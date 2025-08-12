@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH -A NAISS2024-5-577
 #SBATCH -p alvis
-#SBATCH -N 4                        # two nodes
+#SBATCH -N 4                       # two nodes
 #SBATCH --ntasks-per-node=4          # one task per GPU
 #SBATCH --gpus-per-node=A100:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
@@ -17,11 +17,9 @@ echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 
-
 # Show all available interfaces
 echo "Available network interfaces:"
 ip addr show | grep -E "^[0-9]+:" | awk '{print "  " $2}' | sed 's/://'
-
 
 # =============================================================================
 # NETWORK ENVIRONMENT CONFIGURATION
@@ -35,7 +33,6 @@ echo "✓ Environment activated"
 # Setup networking (same as diagnostic)
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=$((30000 + RANDOM % 10000))
-
 
 NODES=$SLURM_NNODES
 TASKS_PER_NODE=$SLURM_NTASKS_PER_NODE

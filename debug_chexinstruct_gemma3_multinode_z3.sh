@@ -3,7 +3,7 @@
 #SBATCH -p alvis
 #SBATCH -N 2                        # two nodes
 #SBATCH --ntasks-per-node=4          # one task per GPU
-#SBATCH --gpus-per-node=A40:4       # 4 GPUs per node
+#SBATCH --gpus-per-node=V100:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
 #SBATCH -t 0-01:00:00               # Aumenta il timeout
 #SBATCH -J "gemma3_MN_debug_z3_normal"
@@ -17,7 +17,6 @@ echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
 
-
 # Show all available interfaces
 echo "Available network interfaces:"
 ip addr show | grep -E "^[0-9]+:" | awk '{print "  " $2}' | sed 's/://'
@@ -28,6 +27,7 @@ echo "Available interfaces:"
 ip addr show | grep -E "^[0-9]+:" | awk '{print "  " $2}' | sed 's/://'
 
 export NETWORK_INTERFACE="ens27f0np0"
+
 
 # Verify it exists and has IP
 if ip addr show "$NETWORK_INTERFACE" 2>/dev/null | grep -q "inet "; then
@@ -162,6 +162,7 @@ srun bash -c '  # 3 ore di timeout
         --bf16 true \
         --debug true
 '
+
 
 exit_code=$?
 echo "Training completed with exit code: $exit_code"

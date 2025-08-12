@@ -2,17 +2,16 @@ import math
 import os
 
 
-import torch
+
 import numpy as np
 import random
 
-from typing import List, Optional
+from typing import List
 from collections import Counter
 
-from itertools import chain
-from torch.utils.data import Sampler, DataLoader, Dataset
+import torch
+from torch.utils.data import Sampler, DataLoader, Dataset, DistributedSampler
 from transformers import MODEL_MAPPING
-from transformers.trainer_pt_utils import get_length_grouped_indices as get_length_grouped_indices_hf
 
 from src.dataset import load_parquet_image_dataset
 
@@ -35,34 +34,6 @@ def rank0_print(*args):
 torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
-
-
-
-
-# Set random seeds for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
-
-
-
-
-
-def group_texts(examples, block_size=512):
-    # Concatenate all texts.
-    concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-    total_length = len(concatenated_examples[list(examples.keys())[0]])
-    # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-    # customize this part to your needs.
-    if total_length >= block_size:
-        total_length = (total_length // block_size) * block_size
-    # Split by chunks of max_len.
-    result = {
-        k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-        for k, t in concatenated_examples.items()
-    }
-    result["labels"] = result["input_ids"].copy()
-    return result
 
 # New Code #
 def evaluate(training_args, model, eval_dataloader, accelerator, logger):
@@ -90,7 +61,6 @@ def evaluate(training_args, model, eval_dataloader, accelerator, logger):
     return perplexity, eval_loss
 
 
-
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
@@ -112,420 +82,24 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     return to_return
 
 
-def split_to_even_chunks(indices, lengths, num_chunks):
+class DistributedSamplerWithBluprint(DistributedSampler):
     """
-    Split a list of indices into `chunks` chunks of roughly equal lengths.
+    A distributed sampler that can be used with a blueprint dataset.
+    This is useful for distributed training where each process needs to sample from the same dataset.
     """
-
-    if len(indices) % num_chunks != 0:
-        return [indices[i::num_chunks] for i in range(num_chunks)]
-
-    num_indices_per_chunk = len(indices) // num_chunks
-
-    chunks = [[] for _ in range(num_chunks)]
-    chunks_lengths = [0 for _ in range(num_chunks)]
-    for index in indices:
-        shortest_chunk = chunks_lengths.index(min(chunks_lengths))
-        chunks[shortest_chunk].append(index)
-        chunks_lengths[shortest_chunk] += lengths[index]
-        if len(chunks[shortest_chunk]) == num_indices_per_chunk:
-            chunks_lengths[shortest_chunk] = float("inf")
-
-    return chunks
-
-
-
-
-
-
-def get_variable_length_grouped_indices(lengths, batch_size, world_size, megabatch_mult=8, generator=None):
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
-    indices = torch.randperm(len(lengths), generator=generator)
-    sorted_indices = sorted(range(len(lengths)), key=lambda i: lengths[i], reverse=True)
-    megabatch_size = world_size * batch_size * megabatch_mult
-    megabatches = [sorted_indices[i : i + megabatch_size] for i in range(0, len(lengths), megabatch_size)]
-    megabatches = [sorted(megabatch, key=lambda i: indices[i], reverse=True) for megabatch in megabatches]
-    shuffled_indices = [i for megabatch in megabatches for i in megabatch]
-    world_batch_size = world_size * batch_size
-    batches = [shuffled_indices[i : i + world_batch_size] for i in range(0, len(lengths), world_batch_size)]
-    batch_indices = torch.randperm(len(batches), generator=generator)
-    batches = [batches[i] for i in batch_indices]
-
-    return [i for batch in batches for i in batch]
-
-
-def get_modality_length_grouped_indices(lengths, batch_size, world_size, generator=None):
-    """
-    Return a list of indices so that each slice of `batch_size` consecutive indices correspond to elements of similar
-    lengths. To do this, the indices are:
-
-    - randomly permuted
-    - grouped in mega-batches of size `mega_batch_mult * batch_size`
-    - reorder by length in each mega-batch
-
-    The result is the concatenation of all mega-batches, with the batch of `batch_size` containing the element of
-    maximum length placed first, so that an OOM happens sooner rather than later.
-    """
-
-    # Ensure all samples have non-zero length
-    assert all(l != 0 for l in lengths), "Should not have zero length."
-    # If all samples belong to a single modality (either all multimodal or all language-only), apply default grouping
-    if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
-        # all samples are in the same modality
-        return get_length_grouped_indices(lengths, batch_size, world_size, generator=generator)
-    # Separate indices and lengths of multimodal and language-only samples
-    mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
-    lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
-
-    # Perform length-based grouping and random shuffling for multimodal samples
-    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=None)]
-    # Perform length-based grouping and random shuffling for language-only samples
-    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=None)]
-    megabatch_size = world_size * batch_size
-    mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
-    lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
-
-    # Prepare for optional merging of final smaller batches from each modality
-    last_mm = mm_megabatches[-1]
-    last_lang = lang_megabatches[-1]
-    additional_batch = last_mm + last_lang
-    # Combine all full megabatches from both modalities
-    megabatches = mm_megabatches[:-1] + lang_megabatches[:-1]
-    # Shuffle the megabatches to avoid ordering bias
-    megabatch_indices = torch.randperm(len(megabatches), generator=generator)
-    # Apply the random shuffling to the megabatches
-    megabatches = [megabatches[i] for i in megabatch_indices]
-
-    # Optionally add the remaining samples as a final megabatch
-    if len(additional_batch) > 0:
-        megabatches.append(sorted(additional_batch))
-
-    return [i for megabatch in megabatches for i in megabatch]
-
-
-def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, merge=True):
-    """
-    Return a list of indices so that each slice of `batch_size` consecutive indices correspond to elements of similar
-    lengths. To do this, the indices are:
-
-    - randomly permuted
-    - grouped in mega-batches of size `mega_batch_mult * batch_size`
-    - reorder by length in each mega-batch
-
-    The result is the concatenation of all mega-batches, with the batch of `batch_size` containing the element of
-    maximum length placed first, so that an OOM happens sooner rather than later.
-    """
-
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
-    indices = torch.randperm(len(lengths), generator=generator)
-    megabatch_size = world_size * batch_size
-    megabatches = [indices[i : i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
-    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
-    megabatches = [split_to_even_chunks(megabatch, lengths, world_size) for megabatch in megabatches]
-
-    return [i for megabatch in megabatches for batch in megabatch for i in batch]
-
-
-def get_length_grouped_indices_auto_single(lengths, batch_size, world_size, generator=None):
-    indices = get_length_grouped_indices_hf(lengths, batch_size * world_size, generator=generator)
-
-    megabatch_size = world_size * batch_size
-    megabatches = [indices[i : i + megabatch_size] for i in range(0, len(lengths), megabatch_size)]
-    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
-    megabatches = [split_to_even_chunks(megabatch, lengths, world_size) for megabatch in megabatches]
-
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
-    batch_indices = torch.randperm(len(megabatches), generator=generator)
-    megabatches = [megabatches[i] for i in batch_indices]
-
-    return [i for megabatch in megabatches for batch in megabatch for i in batch]
-
-
-def get_modality_length_grouped_indices_auto(lengths, batch_size, world_size, generator=None):
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
-    assert all(l != 0 for l in lengths), "Should not have zero length."
-    if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
-        # all samples are in the same modality
-        return get_length_grouped_indices_auto_single(lengths, batch_size, world_size, generator=generator)
-    mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
-    lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
-
-    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices_auto_single(mm_lengths, batch_size, world_size, generator=None)]
-    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices_auto_single(lang_lengths, batch_size, world_size, generator=None)]
-    megabatch_size = world_size * batch_size
-    mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
-    lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
-
-    last_mm = mm_megabatches[-1]
-    last_lang = lang_megabatches[-1]
-    additional_batch = last_mm + last_lang
-    megabatches = mm_megabatches[:-1] + lang_megabatches[:-1]
-    megabatch_indices = torch.randperm(len(megabatches), generator=generator)
-    megabatches = [megabatches[i] for i in megabatch_indices]
-
-    # FIXME: Hard code to avoid last batch mixed with different modalities
-    # if len(additional_batch) > 0:
-    #     megabatches.append(sorted(additional_batch))
-
-    return [i for megabatch in megabatches for i in megabatch]
-
-
-# class BlueprintGroupedSamplerv1(Sampler):
-#     """
-#     FIXED: Sampler that guarantees EXACTLY the same number of images per batch
-#     across all GPUs for memory uniformity in distributed training.
-#     """
-#
-#     def __init__(
-#             self,
-#             batch_size: int,
-#             lengths: List[int],
-#             n_images: List[int],
-#             generator: Optional[torch.Generator] = None,
-#             seed: int = 42,
-#             drop_last: bool = True
-#     ):
-#         super().__init__(None)
-#
-#         self.batch_size = batch_size
-#         self.lengths = lengths
-#         self.n_images = n_images
-#         self.drop_last = drop_last
-#         self.generator = generator or torch.Generator().manual_seed(seed)
-#         self.epoch = 0
-#
-#         # Validation
-#         assert len(lengths) == len(n_images), "lengths and n_images must have same length"
-#         assert all(n in [1, 2] for n in n_images), "n_images must contain only values 1 or 2"
-#         assert batch_size > 0, "batch_size must be positive"
-#
-#         # Pre-compute indices by category
-#         self.indices_1img = np.where(np.array(n_images) == 1)[0]
-#         self.indices_2img = np.where(np.array(n_images) == 2)[0]
-#
-#         print(f"[BlueprintSampler] Dataset: {len(self.indices_1img)} samples with 1 image, {len(self.indices_2img)} samples with 2 images")
-#
-#         # Calculate and validate strategy
-#         self.strategy = self._calculate_uniform_strategy()
-#         self._validate_strategy()
-#
-#         print(f"[BlueprintSampler] Strategy for batch_size={batch_size}: {self.strategy}")
-#
-#     def _calculate_uniform_strategy(self):
-#         """Calculate strategy that ensures EXACTLY batch_size images per GPU."""
-#         target_images = self.batch_size
-#
-#         if target_images == 1:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 0,
-#                     "images_per_batch": 1,
-#                     "description"     : "1 sample with 1 image"
-#             }
-#         elif target_images == 2:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 0,
-#                     "images_per_batch": 2,
-#                     "description"     : "2 sample with 1 images"
-#             }
-#         elif target_images == 3:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 2,
-#                     "images_per_batch": 5,
-#                     "description"     : "1 sample with 2 images + 2 sample with 1 image"
-#             }
-#         elif target_images == 4:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 3,
-#                     "images_per_batch": 7,
-#                     "description"     : "1 samples with 1 images, 3 with 2 each"
-#             }
-#         else:
-#             # General strategy
-#             samples_2img = target_images // 2
-#             samples_1img = target_images % 2
-#
-#             return {
-#                     "samples_1img"    : samples_1img,
-#                     "samples_2img"    : samples_2img,
-#                     "images_per_batch": samples_2img * 2 + samples_1img,
-#                     "description"     : f"{samples_2img} samples with 2 images + {samples_1img} samples with 1 image"
-#             }
-#
-#     def _validate_strategy(self):
-#         """Validate that our strategy is feasible and safe."""
-#         strategy = self.strategy
-#
-#         required_1img = strategy["samples_1img"]
-#         required_2img = strategy["samples_2img"]
-#
-#         if required_1img > 0 and len(self.indices_1img) < required_1img:
-#             raise RuntimeError(
-#                     f"Strategy requires {required_1img} samples with 1 image per batch, "
-#                     f"but dataset only has {len(self.indices_1img)} such samples"
-#             )
-#
-#         if required_2img > 0 and len(self.indices_2img) < required_2img:
-#             raise RuntimeError(
-#                     f"Strategy requires {required_2img} samples with 2 images per batch, "
-#                     f"but dataset only has {len(self.indices_2img)} such samples"
-#             )
-#
-#     def _build_uniform_batches(self, max_batches=None):
-#         """Build batches with guaranteed uniform image count."""
-#         strategy = self.strategy
-#         samples_1img = strategy["samples_1img"]
-#         samples_2img = strategy["samples_2img"]
-#
-#         # Deterministic shuffle
-#         g = torch.Generator()
-#         g.manual_seed(self.epoch + 42)
-#
-#         if len(self.indices_1img) > 0:
-#             indices_1img_shuffled = self.indices_1img[torch.randperm(len(self.indices_1img), generator=g).numpy()]
-#         else:
-#             indices_1img_shuffled = np.array([])
-#
-#         if len(self.indices_2img) > 0:
-#             indices_2img_shuffled = self.indices_2img[torch.randperm(len(self.indices_2img), generator=g).numpy()]
-#         else:
-#             indices_2img_shuffled = np.array([])
-#
-#         # Calculate maximum batches
-#         max_batches_1img = len(indices_1img_shuffled) // samples_1img if samples_1img > 0 else float('inf')
-#         max_batches_2img = len(indices_2img_shuffled) // samples_2img if samples_2img > 0 else float('inf')
-#         if max_batches_2img == float('inf') or max_batches_1img == float('inf'):
-#             max_batches = min(max_batches_2img, max_batches_1img)
-#
-#             remaining = 0
-#         else:
-#             max_batches = min(max_batches_2img, max_batches_1img)
-#             min_batches = max(max_batches_2img, max_batches_1img)
-#             remaining = abs(max_batches - min_batches)
-#
-#         if max_batches == 0:
-#             raise RuntimeError(
-#                     f"Cannot create any complete batches with strategy {strategy}. "
-#                     f"Available: {len(self.indices_1img)} 1-img, {len(self.indices_2img)} 2-img. "
-#                     f"Required per batch: {samples_1img} 1-img, {samples_2img} 2-img."
-#             )
-#
-#         # Build validated batches
-#         batches = []
-#         for batch_idx in range(max_batches):
-#             batch = []
-#
-#             # Add 2-image samples
-#             if samples_2img > 0:
-#                 start_2img = batch_idx * samples_2img
-#                 end_2img = start_2img + samples_2img
-#                 if end_2img <= len(indices_2img_shuffled):
-#                     batch.extend(indices_2img_shuffled[start_2img:end_2img])
-#
-#             # Add 1-image samples
-#             if samples_1img > 0:
-#                 start_1img = batch_idx * samples_1img
-#                 end_1img = start_1img + samples_1img
-#                 if end_1img <= len(indices_1img_shuffled):
-#                     batch.extend(indices_1img_shuffled[start_1img:end_1img])
-#
-#             # Validate batch
-#             if len(batch) != self.batch_size:
-#                 continue
-#
-#             total_images = sum(2 if idx in self.indices_2img else 1 for idx in batch)
-#             batches.append(batch)
-#         # Do the remaining batches
-#         for batch_idx in range(remaining// self.batch_size):
-#             batch = []
-#             # find who is remaining
-#             # Add 2-image samples
-#             if not max_batches_2img == max_batches:
-#                 start_2img = batch_idx * samples_2img
-#                 end_2img = start_2img + samples_2img
-#                 if end_2img <= len(indices_2img_shuffled):
-#                     batch.extend(indices_2img_shuffled[start_2img:end_2img])
-#
-#             # Add 1-image samples
-#             if not max_batches_1img == max_batches:
-#                 # If we are here, we have to add 1-image samples for the amount of batch size
-#                 start_1img = batch_idx * samples_1img
-#                 end_1img = start_1img + samples_1img
-#                 if end_1img <= len(indices_1img_shuffled):
-#                     batch.extend(indices_1img_shuffled[start_1img:end_1img])
-#
-#             # Validate batch
-#             if len(batch) != self.batch_size:
-#                 continue
-#
-#             total_images = sum(2 if idx in self.indices_2img else 1 for idx in batch)
-#             if total_images != self.batch_size:
-#                 raise RuntimeError(f"Batch {batch_idx} has {total_images} images, expected {self.batch_size}")
-#
-#             batches.append(batch)
-#
-#         return batches
-#
-#     def __iter__(self):
-#         batches = self._build_uniform_batches()
-#         indices = []
-#         for batch in batches:
-#             indices.extend(batch)
-#         return iter(indices)
-#
-#     def __len__(self):
-#         try:
-#             batches = self._build_uniform_batches()
-#             return len(batches) * self.batch_size
-#         except RuntimeError:
-#             return 0
-#
-#     def set_epoch(self, epoch: int):
-#         self.epoch = epoch
-#
-#     def get_memory_info(self):
-#         """Report expected memory usage."""
-#         strategy = self.strategy
-#         return {
-#                 "images_per_batch"    : strategy["images_per_batch"],
-#                 "samples_per_batch"   : self.batch_size,
-#                 "strategy_description": strategy["description"],
-#                 "memory_uniformity"   : "GUARANTEED" if strategy["images_per_batch"] == self.batch_size else "VIOLATED"
-#         }
-
-
-class BlueprintGroupedSampler(Sampler):
-    """
-    Sampler che garantisce uniformità nel numero di immagini per batch,
-    compatibile con Accelerate (non fa sharding manuale).
-
-    Strategia:
-    - Bilancia campioni con 1-2 immagini per mantenere memoria uniforme
-    - Lascia ad Accelerate la gestione del distributed training
-    - Mantiene determinismo per reproducibilità
-    """
-
     def __init__(
-            self,
+            self, dataset,
             batch_size: int,
             lengths: List[int],
             n_images: List[int],
-            generator: Optional[torch.Generator] = None,
-            seed: int = 42,
-            drop_last: bool = True
-    ):
-        super().__init__(None)
+            **kwargs
+            ):
+        super().__init__(dataset, **kwargs)
 
         # Parametri base - NON moltiplicare per world_size
         self.batch_size = batch_size  # batch size per device
         self.lengths = lengths
         self.n_images = n_images
-        self.drop_last = drop_last
-        self.generator = generator or torch.Generator().manual_seed(seed)
-        self.epoch = 0
 
         # Validazione input
         assert len(lengths) == len(n_images), "lengths e n_images devono avere la stessa lunghezza"
@@ -540,6 +114,13 @@ class BlueprintGroupedSampler(Sampler):
         # Calcola strategia di sampling basata su batch_size
         self.sampling_strategy = self._calculate_sampling_strategy()
         print(f"[BlueprintSampler] Strategia per batch_size={batch_size}: {self.sampling_strategy}")
+    def len_total(self):
+        """
+        Restituisce il numero totale di campioni nel dataset.
+        """
+        return self.num_samples * self.num_replicas
+
+
 
     def _calculate_sampling_strategy(self):
         """
@@ -560,408 +141,114 @@ class BlueprintGroupedSampler(Sampler):
             # Priorità ai campioni 2-img per efficienza memoria
             samples_2img = min(self.batch_size, self.batch_size // 2 + 1)
             samples_1img = self.batch_size - samples_2img
-            images_per_batch = samples_2img * 2 + samples_1img
+            images_per_batch: int = samples_2img * 2 + samples_1img
             return {
                     "samples_1img"    : samples_1img,
                     "samples_2img"    : samples_2img,
-                    "images_per_batch": images_per_batch
-            }
+                    "images_per_batch": images_per_batch}
 
-    def _build_balanced_batches(self):
-        """
-        Costruisce batch bilanciati con numero uniforme di immagini.
-        """
+    def __iter__(self):
+
         strategy = self.sampling_strategy
         samples_1img = strategy["samples_1img"]
         samples_2img = strategy["samples_2img"]
 
-        # Shuffle deterministico per epoch
-        g = torch.Generator()
-        g.manual_seed(self.epoch + 42)
+        if self.shuffle:
+            # deterministically shuffle based on epoch and seed
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
 
-        # Shuffle degli indici per categoria
-        indices_1img_shuffled = self.indices_1img[torch.randperm(len(self.indices_1img), generator=g).numpy()]
-        indices_2img_shuffled = self.indices_2img[torch.randperm(len(self.indices_2img), generator=g).numpy()]
+            indices_2img_shuffled = torch.randperm(len(self.indices_2img), generator=g).numpy()
+            indices_1img_shuffled = torch.randperm(len(self.indices_1img), generator=g).numpy()
+
+            img1_indices = self.indices_1img[indices_1img_shuffled]
+            img2_indices = self.indices_2img[indices_2img_shuffled]
+        else:
+            # Use the original order if not shuffling
+            img1_indices = self.indices_1img
+            img2_indices = self.indices_2img
+
 
         # Calcola numero massimo di batch possibili
-        max_batches_1img = len(indices_1img_shuffled) // samples_1img if samples_1img > 0 else float('inf')
-        max_batches_2img = len(indices_2img_shuffled) // samples_2img if samples_2img > 0 else float('inf')
-        max_batches = min(max_batches_1img, max_batches_2img)
-
-        if max_batches == 0:
-            print(f"⚠️ [BlueprintSampler] Impossibile creare batch con strategia {strategy}")
-            return []
-
-        # Costruisce i batch
         batches = []
-        for batch_idx in range(max_batches):
+        indices = []
+
+        divider_max_samples = samples_2img * self.num_replicas
+        if  len(img2_indices) % divider_max_samples != 0:
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data when
+            # using this Sampler.
+            img2_indices = img2_indices[:len(img2_indices) - (len(img2_indices) % divider_max_samples)]
+        batches_across_devices = len(img2_indices) / divider_max_samples
+
+
+        for batch_idx in range(int(batches_across_devices)):
             batch = []
 
             # Aggiungi campioni 2-img
-            start_2img = batch_idx * samples_2img
-            end_2img = start_2img + samples_2img
-            if samples_2img > 0 and end_2img <= len(indices_2img_shuffled):
-                batch.extend(indices_2img_shuffled[start_2img:end_2img])
+            start_2img = batch_idx * (samples_2img * self.num_replicas)
+            end_2img = start_2img + (samples_2img * self.num_replicas)
+            if samples_2img > 0 and end_2img <= len(img2_indices):
+                batch.extend(img2_indices[start_2img:end_2img])
 
             # Aggiungi campioni 1-img
-            start_1img = batch_idx * samples_1img
-            end_1img = start_1img + samples_1img
-            if samples_1img > 0 and end_1img <= len(indices_1img_shuffled):
-                batch.extend(indices_1img_shuffled[start_1img:end_1img])
+            start_1img = batch_idx * (samples_1img * self.num_replicas)
+            end_1img = start_1img + (samples_1img * self.num_replicas)
+            if samples_1img > 0 and end_1img <= len(img1_indices):
+                batch.extend(img1_indices[start_1img:end_1img])
 
             # Verifica dimensione batch
-            if len(batch) == self.batch_size:
+            if len(batch) == self.batch_size * self.num_replicas:
                 batches.append(batch)
-            elif not self.drop_last and len(batch) > 0:
-                # Padding se necessario e drop_last=False
-                while len(batch) < self.batch_size:
-                    batch.append(batch[0])  # Replica primo elemento
+
+        # Remaining images
+        if end_1img != len(img1_indices):
+            remaining_1img = img1_indices[end_1img:]
+            if len(remaining_1img) % (self.batch_size * self.num_replicas) != 0:
+                # Split to nearest available length that is evenly divisible.
+                # This is to ensure each rank receives the same amount of data when
+                # using this Sampler.
+                remaining_1img = remaining_1img[:len(remaining_1img) - (len(remaining_1img) % (self.batch_size * self.num_replicas))]
+
+
+        remaining_batches_across_devices = len(remaining_1img) / (self.batch_size * self.num_replicas)
+        for batch_idx in range(int(remaining_batches_across_devices)):
+            batch = []
+
+            # Aggiungi campioni 1-img
+            start_1img = batch_idx * (self.batch_size * self.num_replicas)
+            end_1img = start_1img + (self.batch_size * self.num_replicas)
+            if samples_1img > 0 and end_1img <= len(remaining_1img):
+                batch.extend(remaining_1img[start_1img:end_1img])
+
+            # Verifica dimensione batch
+            if len(batch) == self.batch_size * self.num_replicas:
                 batches.append(batch)
+
+
+
+
 
         print(f"[BlueprintSampler] Creati {len(batches)} batch per epoch {self.epoch}")
-
-        return batches
-
-    def __iter__(self):
-        """Iteratore che restituisce gli indici per l'epoch corrente."""
-        batches = self._build_balanced_batches()
-
-        # Flatten dei batch in sequenza lineare per DataLoader
-        indices = []
         for batch in batches:
             indices.extend(batch)
 
+        if self.drop_last and len(indices) % self.num_replicas != 0:  # type: ignore[arg-type]
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data when
+            # using this Sampler.
+            self.num_samples = math.ceil(
+                    (len(indices) - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
+            )
+        else:
+            self.num_samples = math.ceil(len(indices) / self.num_replicas)  # type: ignore[arg-type]
+
+        # subsample
+        indices = indices[self.rank: len(indices): self.num_replicas]
+        assert len(indices) == self.num_samples
+
+
         return iter(indices)
-
-    def __len__(self):
-        """Numero totale di campioni (non batch)."""
-        batches = self._build_balanced_batches()
-        return len(batches) * self.batch_size
-
-    def set_epoch(self, epoch: int):
-        """Imposta l'epoch per shuffle deterministic."""
-        self.epoch = epoch
-
-#
-# class BlueprintGroupedSampler(Sampler):
-#     """
-#     CORRECTED: Sampler that guarantees a FIXED number of images per batch
-#     regardless of sample composition. For batch_size=4, always produces 7 images.
-#
-#     Strategy Adaptation:
-#     - Primary: 3 samples × 2 images + 1 sample × 1 image = 7 images
-#     - Fallback: 7 samples × 1 image = 7 images (when 2-img samples run out)
-#     """
-#
-#     def __init__(
-#             self,
-#             batch_size: int,
-#             lengths: List[int],
-#             n_images: List[int],
-#             generator: Optional[torch.Generator] = None,
-#             seed: int = 42,
-#             drop_last: bool = True
-#     ):
-#         super().__init__(None)
-#
-#         self.batch_size = batch_size
-#         self.lengths = lengths
-#         self.n_images = n_images
-#         self.drop_last = drop_last
-#         self.generator = generator or torch.Generator().manual_seed(seed)
-#         self.epoch = 0
-#
-#         # Validation
-#         assert len(lengths) == len(n_images), "lengths and n_images must have same length"
-#         assert all(n in [1, 2] for n in n_images), "n_images must contain only values 1 or 2"
-#         assert batch_size > 0, "batch_size must be positive"
-#
-#         # Pre-compute indices by category
-#         self.indices_1img = np.where(np.array(n_images) == 1)[0]
-#         self.indices_2img = np.where(np.array(n_images) == 2)[0]
-#
-#         print(f"[BlueprintSampler] Dataset: {len(self.indices_1img)} samples with 1 image, {len(self.indices_2img)} samples with 2 images")
-#
-#         # Calculate FIXED image target and strategies
-#         self.target_images = self._get_target_images()
-#         self.primary_strategy = self._calculate_primary_strategy()
-#         self.fallback_strategy = self._calculate_fallback_strategy()
-#
-#         self._validate_strategies()
-#
-#         print(f"[BlueprintSampler] Target images per batch: {self.target_images}")
-#         print(f"[BlueprintSampler] Primary strategy: {self.primary_strategy}")
-#         print(f"[BlueprintSampler] Fallback strategy: {self.fallback_strategy}")
-#
-#     def _get_target_images(self):
-#         """
-#         Define the FIXED number of images per batch for each batch_size.
-#         Must be achievable with exactly batch_size samples.
-#         """
-#         # For each batch_size, find the maximum achievable images
-#         # Formula: max_images = batch_size * 2 (all 2-img samples)
-#         # But we need a strategy that's robust to sample scarcity
-#
-#         if self.batch_size == 1:
-#             return 2  # 1 sample × 2 images (or fallback to 1×1img if needed)
-#         elif self.batch_size == 2:
-#             return 3  # 1 sample × 2 images + 1 sample × 1 image
-#         elif self.batch_size == 4:
-#             return 7  # 3 samples × 2 images + 1 sample × 1 image = 7 images
-#         elif self.batch_size == 8:
-#             return 14  # 7 samples × 2 images = 14 images (or fallback: 6×2img + 2×1img = 14)
-#         else:
-#             # General rule: try to maximize images while keeping strategies feasible
-#             # Target around 1.5-1.75x batch_size
-#             return max(self.batch_size, int(self.batch_size * 1.6))
-#
-#     def _calculate_primary_strategy(self):
-#         """Calculate the preferred strategy using both 1-img and 2-img samples."""
-#         target = self.target_images
-#
-#         # Special cases with exact strategies
-#         if self.batch_size == 1 and target == 2:
-#             return {
-#                     "samples_1img"    : 0,
-#                     "samples_2img"    : 1,
-#                     "images_per_batch": 2,
-#                     "description"     : "1 sample with 2 images"
-#             }
-#         elif self.batch_size == 2 and target == 3:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 1,
-#                     "images_per_batch": 3,
-#                     "description"     : "1 sample with 2 images + 1 sample with 1 image"
-#             }
-#         elif self.batch_size == 4 and target == 7:
-#             return {
-#                     "samples_1img"    : 1,
-#                     "samples_2img"    : 3,
-#                     "images_per_batch": 7,
-#                     "description"     : "3 samples with 2 images + 1 sample with 1 image"
-#             }
-#         elif self.batch_size == 8 and target == 14:
-#             return {
-#                     "samples_1img"    : 2,
-#                     "samples_2img"    : 6,
-#                     "images_per_batch": 14,
-#                     "description"     : "6 samples with 2 images + 2 samples with 1 image"
-#             }
-#
-#         # General strategy - find valid combination that uses batch_size samples for target images
-#         for samples_2img in range(self.batch_size + 1):
-#             samples_1img = self.batch_size - samples_2img
-#             if samples_1img < 0:
-#                 continue
-#
-#             total_images = samples_2img * 2 + samples_1img
-#             if total_images == target:
-#                 return {
-#                         "samples_1img"    : samples_1img,
-#                         "samples_2img"    : samples_2img,
-#                         "images_per_batch": total_images,
-#                         "description"     : f"{samples_2img} samples with 2 images + {samples_1img} samples with 1 image"
-#                 }
-#
-#         # If no combination works, this target is impossible for this batch_size
-#         raise ValueError(
-#                 f"Cannot create strategy for batch_size={self.batch_size} with target={target} images. "
-#                 f"No valid combination exists."
-#         )
-#
-#     def _calculate_fallback_strategy(self):
-#         """Calculate fallback strategy when primary strategy can't be used."""
-#         target = self.target_images
-#
-#         # For fallback, we need to fit exactly target_images in batch_size samples
-#         # This requires finding a valid combination of 1-img and 2-img samples
-#
-#         # Try different combinations to achieve exactly target images
-#         for samples_2img in range(self.batch_size + 1):
-#             samples_1img = self.batch_size - samples_2img
-#             if samples_1img < 0:
-#                 continue
-#
-#             total_images = samples_2img * 2 + samples_1img
-#             if total_images == target:
-#                 return {
-#                         "samples_1img"    : samples_1img,
-#                         "samples_2img"    : samples_2img,
-#                         "images_per_batch": total_images,
-#                         "description"     : f"{samples_2img} samples with 2 images + {samples_1img} samples with 1 image"
-#                 }
-#
-#         # If no exact combination exists, this batch_size/target combination is impossible
-#         raise ValueError(
-#                 f"Cannot create fallback strategy for batch_size={self.batch_size} "
-#                 f"with target={target} images. No valid combination of 1-img and 2-img samples exists."
-#         )
-#
-#     def _validate_strategies(self):
-#         """Validate that both strategies produce the target image count."""
-#         # Validate primary strategy
-#         if self.primary_strategy["images_per_batch"] != self.target_images:
-#             raise ValueError(
-#                     f"Primary strategy produces {self.primary_strategy['images_per_batch']} images, "
-#                     f"but target is {self.target_images} images"
-#             )
-#
-#         # Validate fallback strategy
-#         if self.fallback_strategy["images_per_batch"] != self.target_images:
-#             raise ValueError(
-#                     f"Fallback strategy produces {self.fallback_strategy['images_per_batch']} images, "
-#                     f"but target is {self.target_images} images"
-#             )
-#
-#         # Validate sample counts don't exceed batch_size
-#         for strategy_name, strategy in [("Primary", self.primary_strategy), ("Fallback", self.fallback_strategy)]:
-#             total_samples = strategy["samples_1img"] + strategy["samples_2img"]
-#             if total_samples != self.batch_size:
-#                 raise ValueError(
-#                         f"{strategy_name} strategy uses {total_samples} samples, "
-#                         f"but batch_size is {self.batch_size}"
-#                 )
-#
-#     def _build_adaptive_batches(self):
-#         """
-#         Build batches with adaptive strategy switching while maintaining target image count.
-#         """
-#         # Deterministic shuffle
-#         g = torch.Generator()
-#         g.manual_seed(self.epoch + 42)
-#
-#         # Shuffle indices for each category
-#         if len(self.indices_1img) > 0:
-#             indices_1img_shuffled = self.indices_1img[torch.randperm(len(self.indices_1img), generator=g).numpy()]
-#         else:
-#             indices_1img_shuffled = np.array([])
-#
-#         if len(self.indices_2img) > 0:
-#             indices_2img_shuffled = self.indices_2img[torch.randperm(len(self.indices_2img), generator=g).numpy()]
-#         else:
-#             indices_2img_shuffled = np.array([])
-#
-#         batches = []
-#         idx_1img = 0
-#         idx_2img = 0
-#         batch_count = 0
-#
-#         # Try primary strategy first, then switch to fallback when needed
-#         current_strategy = self.primary_strategy
-#         strategy_switches = 0
-#         switched_to_fallback = False
-#
-#         while True:
-#             samples_1img_needed = current_strategy["samples_1img"]
-#             samples_2img_needed = current_strategy["samples_2img"]
-#
-#             # Check if we have enough samples for current strategy
-#             can_use_current = (
-#                     idx_1img + samples_1img_needed <= len(indices_1img_shuffled) and
-#                     idx_2img + samples_2img_needed <= len(indices_2img_shuffled)
-#             )
-#
-#             # If primary strategy fails and we haven't switched yet, switch to fallback
-#             if not can_use_current and current_strategy == self.primary_strategy and not switched_to_fallback:
-#                 current_strategy = self.fallback_strategy
-#                 strategy_switches += 1
-#                 switched_to_fallback = True
-#                 print(f"[BlueprintSampler] Switching to fallback strategy at batch {batch_count}")
-#
-#                 # Re-check with fallback strategy
-#                 samples_1img_needed = current_strategy["samples_1img"]
-#                 samples_2img_needed = current_strategy["samples_2img"]
-#                 can_use_current = (
-#                         idx_1img + samples_1img_needed <= len(indices_1img_shuffled) and
-#                         idx_2img + samples_2img_needed <= len(indices_2img_shuffled)
-#                 )
-#
-#             # If we still can't use current strategy (including fallback), we're done
-#             if not can_use_current:
-#                 break
-#
-#             # Build batch using current strategy
-#             batch = []
-#
-#             # Add 2-image samples
-#             for _ in range(samples_2img_needed):
-#                 if idx_2img < len(indices_2img_shuffled):
-#                     batch.append(indices_2img_shuffled[idx_2img])
-#                     idx_2img += 1
-#                 else:
-#                     # This shouldn't happen if our logic is correct
-#                     print(f"⚠️ Ran out of 2-image samples at batch {batch_count}")
-#                     break
-#
-#             # Add 1-image samples
-#             for _ in range(samples_1img_needed):
-#                 if idx_1img < len(indices_1img_shuffled):
-#                     batch.append(indices_1img_shuffled[idx_1img])
-#                     idx_1img += 1
-#                 else:
-#                     # This shouldn't happen if our logic is correct
-#                     print(f"⚠️ Ran out of 1-image samples at batch {batch_count}")
-#                     break
-#
-#             # Validate batch composition
-#             if len(batch) != self.batch_size:
-#                 print(f"⚠️ Incomplete batch {batch_count}: {len(batch)} samples, expected {self.batch_size}")
-#                 break
-#
-#             # Validate image count (CRITICAL)
-#             total_images = sum(2 if idx in self.indices_2img else 1 for idx in batch)
-#             if total_images != self.target_images:
-#                 raise RuntimeError(
-#                         f"Batch {batch_count} has {total_images} images, expected exactly {self.target_images}. "
-#                         f"Strategy: {current_strategy['description']}"
-#                 )
-#
-#             batches.append(batch)
-#             batch_count += 1
-#
-#             # Safety check to prevent infinite loops
-#             if batch_count > 1000:  # Reasonable upper limit
-#                 print(f"⚠️ Safety break: created {batch_count} batches, stopping to prevent infinite loop")
-#                 break
-#
-#         print(f"[BlueprintSampler] Created {len(batches)} batches for epoch {self.epoch}")
-#         if strategy_switches > 0:
-#             print(f"[BlueprintSampler] Strategy switches: {strategy_switches}")
-#         print(f"[BlueprintSampler] Each batch: {self.target_images} images guaranteed")
-#
-#         return batches
-#
-#     def __iter__(self):
-#         """Iterator that returns indices for the current epoch."""
-#         batches = self._build_adaptive_batches()
-#         indices = []
-#         for batch in batches:
-#             indices.extend(batch)
-#         return iter(indices)
-#
-#     def __len__(self):
-#         """Total number of samples that will be processed."""
-#         try:
-#             batches = self._build_adaptive_batches()
-#             return len(batches) * self.batch_size
-#         except Exception:
-#             return 0
-#
-#     def set_epoch(self, epoch: int):
-#         """Set epoch for deterministic shuffling."""
-#         self.epoch = epoch
-#
-#     def get_memory_info(self):
-#         """Report expected memory usage."""
-#         return {
-#                 "target_images"    : self.target_images,
-#                 "batch_size"       : self.batch_size,
-#                 "primary_strategy" : self.primary_strategy["description"],
-#                 "fallback_strategy": self.fallback_strategy["description"],
-#                 "memory_pattern"   : f"Always {self.target_images} images per batch"
-#         }
-
 
 class FakeVisionDataset(Dataset):
     """Fake dataset for testing with varying image counts and lengths."""
@@ -1046,7 +333,7 @@ def test_adaptive_sampler(dataset):
     lengths = [item['length'] for item in dataset.data]
     n_images = [item['n_images'] for item in dataset.data]
 
-    batch_sizes_to_test = [4, 8]
+    batch_sizes_to_test = [4]
 
     print("\n" + "=" * 80)
     print("ADAPTIVE BLUEPRINT SAMPLER TESTING")
@@ -1097,13 +384,17 @@ def test_adaptive_sampler(dataset):
                 target = min(feasible_targets, key=lambda x: abs(x - target))
                 print(f"Adjusting target to nearest feasible: {target}")
 
-            sampler = BlueprintGroupedSampler(
+            sampler = DistributedSamplerWithBluprint(
+                    dataset=dataset,
                     batch_size=batch_size,
                     lengths=lengths,
                     n_images=n_images,
-                    seed=42
+                    num_replicas=8,  # Assuming single process for testing
+                    rank=0,  # Single rank for testing
+                    shuffle=True,
+                    seed=42,
+                    drop_last=True
             )
-
             # Test with DataLoader
             dataloader = DataLoader(
                     dataset,
@@ -1111,10 +402,6 @@ def test_adaptive_sampler(dataset):
                     batch_size=batch_size,
                     collate_fn=lambda x: x
             )
-
-
-
-
             # Analyze batches
             batch_image_counts = []
             batch_sample_counts = []
@@ -1122,8 +409,8 @@ def test_adaptive_sampler(dataset):
 
             for i, batch in enumerate(dataloader):
                 total_images = sum(item['n_images'] for item in batch)
-                if total_images != target:
-                    print(f"Batch {i}: {len(batch)} samples, {total_images} images")
+                #if total_images != target:
+                print(f"Batch {i}: {len(batch)} samples, {total_images} images")
                 batch_image_counts.append(total_images)
                 batch_sample_counts.append(len(batch))
 
@@ -1180,47 +467,6 @@ def demonstrate_strategy_switching(dataset):
 
     print(f"Limited dataset: {count_1img} 1-image samples, {count_2img} 2-image samples")
 
-    lengths = [item['length'] for item in limited_2img_data]
-    n_images = [item['n_images'] for item in limited_2img_data]
-
-    # Test with batch_size=4 (should switch from primary to fallback)
-    sampler = BlueprintGroupedSampler(
-            batch_size=4,
-            lengths=lengths,
-            n_images=n_images,
-            seed=42
-    )
-
-    # Create a simple dataset wrapper
-    class LimitedDataset(Dataset):
-        def __init__(self, data):
-            self.data = data
-
-        def __len__(self):
-            return len(self.data)
-
-        def __getitem__(self, idx):
-            return self.data[idx]
-
-    limited_dataset = LimitedDataset(limited_2img_data)
-    dataloader = DataLoader(
-            limited_dataset,
-            sampler=sampler,
-            batch_size=4,
-            collate_fn=lambda x: x
-    )
-
-    print(f"\nBatch composition analysis:")
-    for i, batch in enumerate(dataloader):
-        if i >= 10:  # First 10 batches
-            break
-
-        count_1img = sum(1 for item in batch if item['n_images'] == 1)
-        count_2img = sum(1 for item in batch if item['n_images'] == 2)
-        total_images = count_1img + count_2img * 2
-
-        strategy_type = "PRIMARY" if count_2img == 3 else "FALLBACK"
-        print(f"  Batch {i}: {count_2img}×2img + {count_1img}×1img = {total_images} images ({strategy_type})")
 
 if __name__ == "__main__":
     from easydict import EasyDict
@@ -1244,26 +490,27 @@ if __name__ == "__main__":
     )
     data_args = EasyDict(data_args)
 
-    dataset, _ = load_and_prepare_datasets(data_args)
+    dataset_train, dataset_eval = load_and_prepare_datasets(data_args)
     # CREATE A DATASET FAKE WITH THE SAME STRUCTURE AND CONTENTS OF dataset
-    dataset = FakeVisionDataset(n_images=dataset['n_of_images'], lenghts=dataset['length'])
+    dataset_train = FakeVisionDataset(n_images=dataset_train['n_of_images'], lenghts=dataset_train['length'])
     """Test the adaptive sampler with different batch sizes."""
 
     # Analyze dataset
-    analyze_dataset_distribution(dataset)
+    analyze_dataset_distribution(dataset_train)
 
     # Test adaptive sampler
-    results = test_adaptive_sampler(dataset)
+    results_train = test_adaptive_sampler(dataset_train)
 
     # Demonstrate strategy switching
-    demonstrate_strategy_switching(dataset)
+    demonstrate_strategy_switching(dataset_train)
+
 
     # Final summary
     print("\n" + "=" * 80)
-    print("🎯 ADAPTIVE SAMPLER SUMMARY")
+    print("🎯 ADAPTIVE SAMPLER SUMMARY ------ TRAINING")
     print("=" * 80)
 
-    for bs, result in results.items():
+    for bs, result in results_train.items():
 
         if 'target_images' in result:
             target = result['target_images']
@@ -1275,10 +522,34 @@ if __name__ == "__main__":
                 usage = result['strategy_usage']
                 print(f"  Strategy usage: {usage['primary']} primary + {usage['fallback']} fallback batches")
 
-    print(f"\n🔑 Key Benefits:")
-    print(f"   • GUARANTEED fixed image count per batch (e.g., always 7 for batch_size=4)")
-    print(f"   • Adaptive strategy switching when sample types run out")
-    print(f"   • No dangerous fallbacks that cause memory explosions")
-    print(f"   • Predictable memory usage throughout training")
-    print(f"\n🚀 This solves your CUDA OOM issue by maintaining constant memory load!")
-#
+    # Eval dataset
+    print("\n📊 Evaluating dataset with adaptive sampler...")
+    # CREATE A DATASET FAKE WITH THE SAME STRUCTURE AND CONTENTS OF dataset
+    dataset_eval = FakeVisionDataset(n_images=dataset_eval['n_of_images'], lenghts=dataset_eval['length'])
+    """Test the adaptive sampler with different batch sizes."""
+
+    # Analyze dataset
+    analyze_dataset_distribution(dataset_eval)
+
+    # Test adaptive sampler
+    results_eval = test_adaptive_sampler(dataset_eval)
+
+    # Demonstrate strategy switching
+    demonstrate_strategy_switching(dataset_eval)
+
+    # Final summary
+    print("\n" + "=" * 80)
+    print("🎯 ADAPTIVE SAMPLER SUMMARY ------ EVALUATION")
+    print("=" * 80)
+
+    for bs, result in results_eval.items():
+
+        if 'target_images' in result:
+            target = result['target_images']
+            success = result['uniform_images'] and result['correct_target']
+            status = "✅ SUCCESS" if success else "❌ FAILED"
+            print(f"Batch size {bs}: Target {target} images → {status}")
+
+            if success and 'strategy_usage' in result:
+                usage = result['strategy_usage']
+                print(f"  Strategy usage: {usage['primary']} primary + {usage['fallback']} fallback batches")
