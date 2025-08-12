@@ -553,3 +553,39 @@ if __name__ == "__main__":
             if success and 'strategy_usage' in result:
                 usage = result['strategy_usage']
                 print(f"  Strategy usage: {usage['primary']} primary + {usage['fallback']} fallback batches")
+
+
+
+def compute_SFT(model, batch):
+    """
+    TODO Complete the loss for SFT (Supervised Fine-Tuning) tasks.
+    Compute the loss for SFT (Supervised Fine-Tuning) tasks.
+    """
+    # Ensure model is in training mode
+    model.train()
+
+    # Forward pass
+    outputs = model(**batch)
+
+    # Extract loss
+    loss = outputs.loss
+
+
+    return loss
+
+def compute_DFT(model, batch):
+    """
+    TODO Complete the loss for DFT (Dynamic SUpervised Fine-Tuning) tasks.
+    Compute the loss for SFT (Supervised Fine-Tuning) tasks.
+    """
+    # Ensure model is in training mode
+    model.train()
+
+    # Forward pass
+    outputs = model(**batch)
+
+    # Extract loss
+    loss = outputs.loss
+
+
+    return loss

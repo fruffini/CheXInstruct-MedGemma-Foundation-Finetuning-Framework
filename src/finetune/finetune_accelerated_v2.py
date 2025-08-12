@@ -34,8 +34,8 @@ sys.path.extend(["./src", './'])
 from src.dataset import load_parquet_image_dataset
 from src.models import get_collator, configure_model_for_training
 from src.distributed import checkpoint_save_with_sync, safe_wait_for_everyone_simple
-from util_finetune import evaluate, DistributedSamplerWithBluprint, rank0_print
-from torch.utils.data.distributed import DistributedSampler
+from util_finetune import evaluate, DistributedSamplerWithBluprint, rank0_print, compute_SFT, compute_DFT
+
 # Environment setup
 cache_dir = os.path.join(os.getcwd(), "hf_cache")
 os.environ["HF_DATASETS_CACHE"] = cache_dir
@@ -144,6 +144,8 @@ class CustomTrainingArguments:
     # Training configuration
     max_train_steps: Optional[int] = field(default=None, metadata={"help": "Total number of training steps to perform. If provided, overrides num_train_epochs."})
     bf16: bool = field(default=False, metadata={"help": "Whether to use bfloat16 mixed precision."})
+    loss_function: str = field(default="default", metadata={"help": "Loss function to use. Options: default, SFT or DFT."})
+
 
 
     # Scheduler configuration
@@ -403,10 +405,6 @@ def setup_model_and_config(model_args, training_args, data_args):
                 finetune_mlp_modules=training_args.finetune_mlp_modules,
         )
 
-        # Debug: Check model state after LoRA
-        #print("📊 Model state AFTER LoRA:")
-        #debug_tensor_shapes(model, "AFTER_LORA: ")
-
         # Verify that we have trainable parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         if len(trainable_params) == 0:
@@ -597,6 +595,10 @@ def save_complete_checkpoint(
     # Synchronize all processes
     accelerator.wait_for_everyone()
     return True
+
+
+
+
 def training_step(
         model: torch.nn.Module,
         batch: dict[str, Any],
@@ -623,7 +625,6 @@ def training_step(
 
     return loss.detach()
 
-
 def main():
     # Parse arguments with flexible handling
     model_args, data_args, training_args, remaining = parse_args_flexible()
@@ -633,7 +634,17 @@ def main():
 
     # Setup logging
     setup_logging(training_args)
+    print("✅ Logging setup completed")
+    training_args.output_dir += "lora" + str(training_args.lora_r) + "_alpha" + str(training_args.lora_alpha) if training_args.lora_enable else ""
 
+    training_args.output_dir += f"_{training_args.loss_function}" if training_args.loss_function != "default" else "_vanilla"
+
+    os.makedirs(training_args.output_dir, exist_ok=True)
+
+
+    # NOW initialize accelerator with DeepSpeed config
+    accelerator = initialize_accelerator_safely(training_args=training_args)
+    print("✅ Accelerator initialized successfully")
 
     # Verbose logging
     if training_args.verbose_logging:
@@ -655,17 +666,18 @@ def main():
         train_dataset = train_dataset.select(range(0, len(train_dataset), len(train_dataset) // 1787))
         eval_dataset = eval_dataset.select(range(0, len(eval_dataset), len(eval_dataset) // 178))
 
-
-
     print("✅ Datasets loaded successfully")
 
     # CRITICAL: Setup model and LoRA BEFORE accelerator initialization
     print("🔄 Setting up model with LoRA...")
+    # Ensure model_args is not None
+    accelerator.wait_for_everyone()
     model = setup_model_and_config(
             model_args=model_args,
             training_args=training_args,
             data_args=data_args
     )
+    accelerator.wait_for_everyone()
     print("✅ Model and LoRA setup completed")
     # Get collator and tokenizer
     print("🔄 Setting up collator...")
@@ -675,13 +687,11 @@ def main():
             token=hf_token
     )
 
+
     processor = collator.processor
     tokenizer = collator.tokenizer if hasattr(collator, 'tokenizer') else processor
     print("✅ Collator setup completed")
 
-    # NOW initialize accelerator with DeepSpeed config
-    accelerator = initialize_accelerator_safely(training_args=training_args)
-    print("✅ Accelerator initialized successfully")
 
     # Calculate training steps
     if accelerator.num_processes == 0:
@@ -783,6 +793,13 @@ def main():
     optimizer, lr_scheduler = create_optimizers_with_parameter_groups(model, training_args, accelerator)
     print("✅ Optimizer created successfully")
 
+    if training_args.loss_function == "SFT":
+        compute_loss_fn = compute_SFT
+    elif training_args.loss_function == "DFT":
+        compute_loss_fn = compute_DFT
+    else:
+        compute_loss_fn = None  # Default loss function in the model.loss attribute (NLLLoss)
+
     # Initialize tracking if enabled
     if training_args.with_tracking:
         # Config personalizzato per W&B
@@ -794,7 +811,8 @@ def main():
                 "lora_r"       : training_args.lora_r,
                 "lora_alpha"   : training_args.lora_alpha,
                 "epochs"       : training_args.num_train_epochs,
-                "processes"    : accelerator.num_processes
+                "processes"    : accelerator.num_processes,
+                "loss"         : training_args.loss_function
         }
 
 
@@ -804,10 +822,11 @@ def main():
                 init_kwargs={
                         "wandb": {
                                 "name": f'gemma3-multinode-{datetime.now().strftime("%m%d-%H%M")}-JOB-{os.environ.get("SLURM_JOB_ID", "")}',
-                                "tags": ["multinode", "gemma3", "lora", "deepspeed"]
+                                "tags": ["multinode", f"{model_args.model_name_or_path}", "lora", "deepspeed", f"{training_args.loss_function}"]
                         }
                 }
         )
+
 
     print("✅ Accelerator initialized successfully")
     # Final parameter check before prepare
@@ -837,7 +856,6 @@ def main():
 
         )
         print("✅ All components prepared successfully with accelerator")
-
 
     except Exception as e:
         logger.error(f"❌ Error during accelerator.prepare(): {e}")
@@ -944,7 +962,7 @@ def main():
         )
 
 
-        #active_dataloader.sampler.set_epoch(epoch)
+        active_dataloader.sampler.set_epoch(epoch)
         for step, batch in enumerate(active_dataloader):
             if step == 0 and training_args.debug:
                 # Debug: Check if the first batch is empty
@@ -966,6 +984,7 @@ def main():
                     model=model,
                     batch=batch,
                     accelerator=accelerator,
+                    compute_loss_fn=compute_loss_fn,
                     gradient_accumulation_steps=training_args.gradient_accumulation_steps
             )
 

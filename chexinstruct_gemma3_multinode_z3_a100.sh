@@ -5,14 +5,15 @@
 #SBATCH --ntasks-per-node=4          # one task per GPU
 #SBATCH --gpus-per-node=A100:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
-#SBATCH -t 1-16:00:00               # Aumenta il timeout
+#SBATCH -t 1-08:00:00               # Aumenta il timeout
 #SBATCH -J "gemma3_MN_TRAIN_lora_vanilla"
 #SBATCH --error=_TRAIN_%J.err
 #SBATCH --output=_TRAIN_%J.out
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ruffin02@outlook.it
-set -euo pipefail
 
+set -euo pipefail
+# =============================================================================
 echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
@@ -76,16 +77,13 @@ echo "=== Launching Training with Direct SLURM (Working Method) ==="
 export ACCELERATE_CONFIG_FILE="deepspeed/ds_zero3_config.yaml"
 # Use the EXACT same srun pattern that worked in diagnostics
 
-
-
-
-export OUTPUT_DIR="./reports/finetune_gemma_findings_zero3_trainer_lora64_vanilla"
+export OUTPUT_DIR="./reports/finetune_gemma_findings_zero3"
 
 mkdir -p "$OUTPUT_DIR"  # Assicurati che la directory di output esista
 
 export BATCH=4
-export EPOCHS=4
-export EVAL_STEPS=64  # Riduci evaluation steps per testare più spesso
+export EPOCHS=3
+export EVAL_STEPS=128  # Riduci evaluation steps per testare più spesso
 export GRADIENT_ACCUMULATION_STEPS=4  # Aumenta per compensare batch size ridotta
 
 # Aggiungi timeout per processi bloccati
@@ -144,6 +142,8 @@ pkill -f "python.*finetune" || true
 # Reset GPU se necessario
 nvidia-smi --gpu-reset || true
 exit $exit_code
+
+
 
 
 
