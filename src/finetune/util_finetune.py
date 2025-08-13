@@ -225,7 +225,11 @@ class DistributedSamplerWithBluprint(DistributedSampler):
             if len(batch) == self.batch_size * self.num_replicas:
                 batches.append(batch)
 
-
+        if len(batches)// self.num_replicas != 0:
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data when
+            # using this Sampler.
+            batches = batches[:len(batches) - (len(batches) % self.num_replicas)]
 
 
 
@@ -233,18 +237,20 @@ class DistributedSamplerWithBluprint(DistributedSampler):
         for batch in batches:
             indices.extend(batch)
 
-        if self.drop_last and len(indices) % self.num_replicas != 0:  # type: ignore[arg-type]
-            # Split to nearest available length that is evenly divisible.
-            # This is to ensure each rank receives the same amount of data when
-            # using this Sampler.
-            self.num_samples = math.ceil(
-                    (len(indices) - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
-            )
-        else:
-            self.num_samples = math.ceil(len(indices) / self.num_replicas)  # type: ignore[arg-type]
+
+        self.num_samples = math.ceil(len(indices) / self.num_replicas)  # type: ignore[arg-type]
+
 
         # subsample
         indices = indices[self.rank: len(indices): self.num_replicas]
+        sub = [2, 2, 2, 2]
+
+        # Method 1: Sliding window
+        lst = [self.n_images[i] for i in indices]
+        found = any(lst[i:i + len(sub)] == sub for i in range(len(lst) - len(sub) + 1))
+
+        if found:
+            print("Found:not correct (2,2,2,2) batch", found)
         assert len(indices) == self.num_samples
 
 
@@ -389,7 +395,7 @@ def test_adaptive_sampler(dataset):
                     batch_size=batch_size,
                     lengths=lengths,
                     n_images=n_images,
-                    num_replicas=8,  # Assuming single process for testing
+                    num_replicas=16,  # Assuming 16 ranks for testing
                     rank=0,  # Single rank for testing
                     shuffle=True,
                     seed=42,

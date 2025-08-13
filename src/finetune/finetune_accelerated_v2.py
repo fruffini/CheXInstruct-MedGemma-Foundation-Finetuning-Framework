@@ -341,10 +341,10 @@ def load_and_prepare_datasets(data_args):
                 num_proc=data_args.preprocessing_num_workers,
         )
 
-        if data_args.data_debug:
-            # Reduce the dataset size for debugging purposes
-            for split in raw_datasets.keys():
-                raw_datasets[split] = raw_datasets[split].select(range(0, len(raw_datasets[split]), len(raw_datasets[split]) // 1787))
+        # if data_args.data_debug:
+        #     # Reduce the dataset size for debugging purposes
+        #     for split in raw_datasets.keys():
+        #         raw_datasets[split] = raw_datasets[split].select(range(0, len(raw_datasets[split]), len(raw_datasets[split]) // 1787))
 
     elif data_args.dataset_name is None:
         raise ValueError(
@@ -661,10 +661,6 @@ def main():
     # Load datasets
     print("🔄 Loading datasets...")
     train_dataset, eval_dataset = load_and_prepare_datasets(data_args)
-    if training_args.debug:
-        # Reduce dataset size for debugging purposes
-        train_dataset = train_dataset.select(range(0, len(train_dataset), len(train_dataset) // 1787))
-        eval_dataset = eval_dataset.select(range(0, len(eval_dataset), len(eval_dataset) // 178))
 
     print("✅ Datasets loaded successfully")
 
@@ -890,16 +886,12 @@ def main():
     if training_args.debug:
         # Debugging: Check if the dataloaders are correctly set up
         for i, b in tqdm(enumerate(train_dataloader), desc="Checking train dataloader batches", total=len(train_dataloader)):
-            print(b.keys())
+            pixel_values = b['pixel_values']
             #assert 'pixel_values' in b.keys(), f"Batch {i} does not contain 'pixel_values' key. Available keys: {b.keys()}"
             # Debug: Check tensor shapes in the first batch
-            if i == 0:
-                print("🔄 Checking tensor shapes in the first batch:")
-                for key, value in b.items():
-                    if isinstance(value, torch.Tensor):
-                        print(f"   {key}: {value.shape} on device {value.device}")
-                    else:
-                        print(f"   {key}: {type(value)} (not a tensor)")
+            #print("🔄 Checking tensor shapes in the first batch only for images:")
+            if pixel_values.shape[0] != 7:
+                logger.warning(f" Batch {i} with pixel_values shape {pixel_values.shape}. Expected batch size of 7. -- device {pixel_values.device}")
 
 
     # Initialize W&B run name
@@ -908,7 +900,8 @@ def main():
         run_name = f'{model_args.model_name_or_path.split("/")[-1]}-finetuning-{training_args.peft_strategy}-date-{datetime.now().strftime("%Y-%m-%d")}-epoch-{training_args.num_train_epochs}-bs-{training_args.per_device_train_batch_size}'
         os.environ["WANDB_PROJECT"] = project_name  # project in W&B UI
         os.environ["WANDB_RUN_NAME"] = run_name  # run name in W&B UI
-        os.environ["WANDB_NAME"] = run_name  # alternative alias for run name
+        os.environ["WANDB_NAME"] = run_name  # alternative alias for run name        [0, 0, 0,  ..., 0, 0, 0]]), 'pixel_values': tensor([[[[-1., -1., -1.,  ..., -1., -1., -1.],
+
 
 
 
@@ -971,7 +964,7 @@ def main():
                     raise ValueError("First batch is empty or malformed. Please check your dataset and collator.")
             pixel_values = batch['pixel_values']
             if pixel_values.shape[0] != 7:
-                logger.warning(f" atch {step} with pixel_values shape {pixel_values.shape}. Expected batch size of 7. -- device {pixel_values.device}")
+                logger.warning(f" Batch {step} with pixel_values shape {pixel_values.shape}. Expected batch size of 7. -- device {pixel_values.device}")
             if accelerator.is_main_process:
                 logger.info(f"||||Step {step + 1} / {len(active_dataloader)} ||||  ")
             # Training step

@@ -12,6 +12,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ruffin02@outlook.it
 
+
 set -euo pipefail
 # =============================================================================
 echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="

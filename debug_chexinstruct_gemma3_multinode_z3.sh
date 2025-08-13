@@ -3,7 +3,7 @@
 #SBATCH -p alvis
 #SBATCH -N 2                        # two nodes
 #SBATCH --ntasks-per-node=4          # one task per GPU
-#SBATCH --gpus-per-node=V100:4       # 4 GPUs per node
+#SBATCH --gpus-per-node=A100:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
 #SBATCH -t 0-01:00:00               # Aumenta il timeout
 #SBATCH -J "gemma3_MN_debug_z3_normal"
@@ -73,7 +73,7 @@ echo "MASTER_ADDR=$MASTER_ADDR"
 echo "MASTER_PORT=$MASTER_PORT"
 echo "WORLD_SIZE=$WORLD_SIZE"
 # Configure NCCL with detected interface
-export NCCL_SOCKET_IFNAME="$NETWORK_INTERFACE"
+export NCCL_SOCKET_IFNAME=ib0 #"$NETWORK_INTERFACE"
 export NCCL_IB_DISABLE=0
 # TORCH
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -162,7 +162,6 @@ srun bash -c '  # 3 ore di timeout
         --bf16 true \
         --debug true
 '
-
 
 exit_code=$?
 echo "Training completed with exit code: $exit_code"
