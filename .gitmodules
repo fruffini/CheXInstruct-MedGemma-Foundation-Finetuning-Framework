@@ -4,3 +4,6 @@
 [submodule "modules/ReXrank"]
 	path = modules/ReXrank
 	url = https://github.com/rajpurkarlab/ReXrank.git
+[submodule "modules/GREEN"]
+	path = modules/GREEN
+	url = https://github.com/Stanford-AIMI/GREEN.git
