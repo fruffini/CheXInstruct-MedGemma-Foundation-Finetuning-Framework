@@ -72,36 +72,6 @@ def data_format_qwen25vl_conversation_alt(example: Dict[str, Any]) -> Dict[str, 
     return example
 
 
-# def data_format_gemma_conversation(example: dict[str, Any]) -> dict[str, Any]:
-#     # Find the lenght of the image list
-#     N_images = len(example.get("images", []))
-#     content_list = []
-#     for i in range(N_images):
-#         content_list.append(
-#                 {
-#                         "type": "image",
-#                 }
-#         )
-#     content_list.append(example['instruction'])
-#
-#
-#     example["messages"] = [
-#             {
-#                     "role"   : "user",
-#                     "content": content_list
-#             },
-#             {
-#                     "role"   : "assistant",
-#                     "content": [
-#                             {
-#                                     "type": "text",
-#                                     "text": example['response'],
-#                             },
-#                     ],
-#             },
-#     ]
-#     return example
-
 def data_format_gemma_conversation_chexinstruct(samples: dict[str, any], single=True, load_path=True) -> dict[str, list]:
     formatted_samples = {"messages": []}
 

@@ -18,6 +18,7 @@
 *.pt
 *.pickle
 *.pkl
+*.arrow
 
 /src/finetune/Tutorials/
 /Users/filruff/Desktop/PHD/PROGETTI
