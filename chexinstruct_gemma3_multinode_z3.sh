@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=4          # one task per GPU
 #SBATCH --gpus-per-node=A40:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
-#SBATCH -t 0-06:00:00               # Aumenta il timeout
+#SBATCH -t 0-16:00:00               # Aumenta il timeout
 #SBATCH -J "gemma3_MN_TRAIN_lora_vanilla"
 #SBATCH --error=_TRAIN_%J.err
 #SBATCH --output=_TRAIN_%J.out

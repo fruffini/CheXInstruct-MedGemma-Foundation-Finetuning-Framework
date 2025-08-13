@@ -9,6 +9,7 @@ from datasets import load_dataset, DatasetDict
 import PIL
 import torchvision.transforms as T
 import requests
+from torch.utils.data.distributed import DistributedSampler
 
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
@@ -22,16 +23,14 @@ FPS = 2.0
 FPS_MIN_FRAMES = 4
 FPS_MAX_FRAMES = 768
 
-
 __all__ = [
-    "load_parquet_image_dataset",
-    "save_dataset_as_parquet",
-    "image_preproc",
-    "SimpleCollator",
-    "get_text_column",
-    "load_dataset",
+        "load_parquet_image_dataset",
+        "save_dataset_as_parquet",
+        "image_preproc",
+        "SimpleCollator",
+        "get_text_column",
+        "load_dataset",
 ]
-
 
 class SimpleCollator:
     """Simple collator that can be pickled"""
@@ -61,6 +60,7 @@ class SimpleCollator:
 
             return result
 
+
 def has_valid_pil_images(examples, log_bad=None):
     """
     Validate that every PIL.Image in `example["image"]` truly decodes.
@@ -85,7 +85,6 @@ def has_valid_pil_images(examples, log_bad=None):
     #     return False
     mask_list = []
     for imgs in examples['image']:
-
 
         for img in imgs:
             if img == None:
@@ -128,10 +127,9 @@ def load_parquet_image_dataset(dataset_dir: str, split_list: list = [], **kwargs
 
     for split in split_list:
         for split_file in os.listdir(dataset_dir):
-            if split in split_file and split_file.endswith(".parquet") :
+            if split in split_file and split_file.endswith(".parquet"):
                 split_files[split_file.replace("data_", "").replace(".parquet", "") if 'tokenized' not in split_file else
                 split_file.replace("data_", "").replace(".parquet", "").replace('tokenized_', '')] = os.path.join(dataset_dir, split_file)
-
 
     dataset_dict = load_dataset("parquet", data_files=split_files, **kwargs)
     return dataset_dict
@@ -147,14 +145,13 @@ def save_dataset_as_parquet(dataset_dict, output_dir, name_file):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-
     for split in dataset_dict:
         parquet_path = os.path.join(output_dir, f"{name_file}_data_{split}.parquet")
         dataset_dict[split].to_parquet(parquet_path)
         print(f"✅ Saved split '{split}' to: {parquet_path}")
 
 
-def image_preproc(img_size: int=224) -> T.Compose:
+def image_preproc(img_size: int = 224) -> T.Compose:
     """
     Returns a torchvision transform for image preprocessing.
     Args:
@@ -165,12 +162,11 @@ def image_preproc(img_size: int=224) -> T.Compose:
 
     """
     return T.Compose(
-                [T.Resize(img_size + 16), # Resize to a larger size to ensure center crop works well
-             T.CenterCrop(img_size), # Center crop to the desired size
-             T.ToTensor() # Convert PIL Image or numpy.ndarray to tensor
+            [T.Resize(img_size + 16),  # Resize to a larger size to ensure center crop works well
+             T.CenterCrop(img_size),  # Center crop to the desired size
+             T.ToTensor()  # Convert PIL Image or numpy.ndarray to tensor
              ]
     )
-
 
 
 def get_text_column(dataset):
@@ -189,7 +185,6 @@ def get_text_column(dataset):
     raise ValueError("No text column found in dataset")
 
 
-
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
@@ -206,7 +201,7 @@ def floor_by_factor(number: int, factor: int) -> int:
 
 
 def smart_resize(
-    height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
+        height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
 ) -> Tuple[int, int]:
     """
     Rescales the image so that the following conditions are met:
@@ -219,7 +214,7 @@ def smart_resize(
     """
     if max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
+                f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
         )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
@@ -235,8 +230,8 @@ def smart_resize(
 
 
 def fetch_image(
-    ele: Dict,
-    size_factor: int = IMAGE_FACTOR,
+        ele: Dict,
+        size_factor: int = IMAGE_FACTOR,
 ) -> PIL.Image.Image:
     if "image" in ele:
         image = ele["image"]
@@ -265,25 +260,24 @@ def fetch_image(
     ## resize
     if "resized_height" in ele and "resized_width" in ele:
         resized_height, resized_width = smart_resize(
-            ele["resized_height"],
-            ele["resized_width"],
-            factor=size_factor,
+                ele["resized_height"],
+                ele["resized_width"],
+                factor=size_factor,
         )
     else:
         width, height = image.size
         min_pixels = ele.get("min_pixels", MIN_PIXELS)
         max_pixels = ele.get("max_pixels", MAX_PIXELS)
         resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
+                height,
+                width,
+                factor=size_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
         )
     image = image.resize((resized_width, resized_height))
 
     return image
-
 
 
 def extract_vision_info(conversations: Union[List[Dict], List[List[Dict]]]) -> List[Dict]:
@@ -295,17 +289,17 @@ def extract_vision_info(conversations: Union[List[Dict], List[List[Dict]]]) -> L
             if isinstance(message["content"], list):
                 for ele in message["content"]:
                     if (
-                        "image" in ele
-                        or "image_url" in ele
-                        or "video" in ele
-                        or ele["type"] in ("image", "image_url", "video")
+                            "image" in ele
+                            or "image_url" in ele
+                            or "video" in ele
+                            or ele["type"] in ("image", "image_url", "video")
                     ):
                         vision_infos.append(ele)
     return vision_infos
 
 
 def process_vision_info(
-    conversations: Union[List[Dict], List[List[Dict]]],
+        conversations: Union[List[Dict], List[List[Dict]]],
 ) -> Tuple[Union[List[PIL.Image.Image], None], Union[List[Union[torch.Tensor, List[PIL.Image.Image]]], None]]:
     vision_infos = extract_vision_info(conversations)
     ## Read images or videos
@@ -345,22 +339,19 @@ def get_padding_tokens_ids(tokenizer):
     return padding_token_ids
 
 
-
 def _get_dtype(dtype):
     __DTYPE_MAP = {
-        "float32": torch.float32,
-        torch.float32: torch.float32,
-        "float16": torch.float16,
-        torch.float16: torch.float16,
-        "bfloat16": torch.bfloat16,
-        torch.bfloat16: torch.bfloat16,
+            "float32"     : torch.float32,
+            torch.float32 : torch.float32,
+            "float16"     : torch.float16,
+            torch.float16 : torch.float16,
+            "bfloat16"    : torch.bfloat16,
+            torch.bfloat16: torch.bfloat16,
     }
-    if   dtype is None or dtype == None: return None
-    elif dtype in __DTYPE_MAP: return __DTYPE_MAP[dtype]
+    if dtype is None or dtype == None:
+        return None
+    elif dtype in __DTYPE_MAP:
+        return __DTYPE_MAP[dtype]
     else:
         print(f"Unsloth: {dtype} is not recognized, so we'll default to None")
         return None
-
-
-
-

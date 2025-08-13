@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #SBATCH -A NAISS2024-5-577
 #SBATCH -p alvis
-#SBATCH -N 2                        # two nodes
+#SBATCH -N 4                       # two nodes
 #SBATCH --ntasks-per-node=4          # one task per GPU
 #SBATCH --gpus-per-node=A100:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
-#SBATCH -t 0-01:00:00               # Aumenta il timeout
-#SBATCH -J "gemma3_MN_debug_z3_normal"
-#SBATCH --error=_debug_%J.err
-#SBATCH --output=_debug_%J.out
+#SBATCH -t 1-08:00:00               # Aumenta il timeout
+#SBATCH -J "gemma3_MN_TRAIN_lora_vanilla"
+#SBATCH --error=_TRAIN_%J.err
+#SBATCH --output=_TRAIN_%J.out
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ruffin02@outlook.it
-set -euo pipefail
 
+
+set -euo pipefail
+# =============================================================================
 echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_JOB_NODELIST"
@@ -20,34 +22,6 @@ echo "Nodes: $SLURM_JOB_NODELIST"
 # Show all available interfaces
 echo "Available network interfaces:"
 ip addr show | grep -E "^[0-9]+:" | awk '{print "  " $2}' | sed 's/://'
-
-echo "=== Alvis Network Configuration ==="
-echo "Node: $(hostname)"
-echo "Available interfaces:"
-ip addr show | grep -E "^[0-9]+:" | awk '{print "  " $2}' | sed 's/://'
-
-export NETWORK_INTERFACE="ens27f0np0"
-
-
-# Verify it exists and has IP
-if ip addr show "$NETWORK_INTERFACE" 2>/dev/null | grep -q "inet "; then
-    echo "✅ Interface $NETWORK_INTERFACE is configured and ready"
-    INTERFACE_IP=$(ip addr show "$NETWORK_INTERFACE" | grep "inet " | head -1 | awk '{print $2}' | cut -d'/' -f1)
-    echo "Interface IP: $INTERFACE_IP"
-else
-    echo "⚠️  $NETWORK_INTERFACE has no IP, checking VLAN interfaces..."
-
-    # Try VLAN interfaces
-    for vlan_if in ens27f0np0.1044 ens27f0np0.1043; do
-        if ip addr show "$vlan_if" 2>/dev/null | grep -q "inet "; then
-            NETWORK_INTERFACE="$vlan_if"
-            echo "✅ Using VLAN interface: $NETWORK_INTERFACE"
-            INTERFACE_IP=$(ip addr show "$NETWORK_INTERFACE" | grep "inet " | head -1 | awk '{print $2}' | cut -d'/' -f1)
-            echo "Interface IP: $INTERFACE_IP"
-            break
-        fi
-    done
-fi
 
 # =============================================================================
 # NETWORK ENVIRONMENT CONFIGURATION
@@ -62,7 +36,6 @@ echo "✓ Environment activated"
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=$((30000 + RANDOM % 10000))
 
-
 NODES=$SLURM_NNODES
 TASKS_PER_NODE=$SLURM_NTASKS_PER_NODE
 WORLD_SIZE=$((NODES * TASKS_PER_NODE))
@@ -73,7 +46,7 @@ echo "MASTER_ADDR=$MASTER_ADDR"
 echo "MASTER_PORT=$MASTER_PORT"
 echo "WORLD_SIZE=$WORLD_SIZE"
 # Configure NCCL with detected interface
-export NCCL_SOCKET_IFNAME=ib0 #"$NETWORK_INTERFACE"
+export NCCL_SOCKET_IFNAME=ib0
 export NCCL_IB_DISABLE=0
 # TORCH
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -105,14 +78,13 @@ echo "=== Launching Training with Direct SLURM (Working Method) ==="
 export ACCELERATE_CONFIG_FILE="deepspeed/ds_zero3_config.yaml"
 # Use the EXACT same srun pattern that worked in diagnostics
 
-export OUTPUT_DIR="./reports/finetune_gemma_findings_zero3_trainer_lora64"
-mkdir -p "./reports/finetune_gemma_findings_zero3_trainer_lora64_twonode_dbg"
+export OUTPUT_DIR="./reports/finetune_gemma_findings_zero3"
+
 mkdir -p "$OUTPUT_DIR"  # Assicurati che la directory di output esista
 
-
 export BATCH=4
-export EPOCHS=2
-export EVAL_STEPS=4  # Riduci evaluation steps per testare più spesso
+export EPOCHS=3
+export EVAL_STEPS=128  # Riduci evaluation steps per testare più spesso
 export GRADIENT_ACCUMULATION_STEPS=4  # Aumenta per compensare batch size ridotta
 
 # Aggiungi timeout per processi bloccati
@@ -130,7 +102,6 @@ srun bash -c '  # 3 ore di timeout
   # Crea directory di output per questo processo
   mkdir -p '"$OUTPUT_DIR"'
 
-
   # Run the training script directly (no accelerate launcher)
   python src/finetune/finetune_accelerated_v2.py \
         --deepspeed_config_file '"$ACCELERATE_CONFIG_FILE"' \
@@ -146,7 +117,7 @@ srun bash -c '  # 3 ore di timeout
         --report_to wandb \
         --preprocessing_num_workers 1 \
         --weight_decay 0.0001 \
-        --warmup_ratio 0.1 \
+        --warmup_ratio 0.01 \
         --model_max_length 1500 \
         --lora_enable true \
         --lora_alpha 64 \
@@ -160,9 +131,8 @@ srun bash -c '  # 3 ore di timeout
         --load_best_model true \
         --verbose_logging false \
         --bf16 true \
-        --debug true
+        --debug false
 '
-
 exit_code=$?
 echo "Training completed with exit code: $exit_code"
 
@@ -172,5 +142,9 @@ echo "=== Final cleanup ==="
 pkill -f "python.*finetune" || true
 # Reset GPU se necessario
 nvidia-smi --gpu-reset || true
-
 exit $exit_code
+
+
+
+
+
