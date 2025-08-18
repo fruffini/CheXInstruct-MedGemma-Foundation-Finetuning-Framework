@@ -121,7 +121,6 @@ class DistributedSamplerWithBluprint(DistributedSampler):
         return self.num_samples * self.num_replicas
 
 
-
     def _calculate_sampling_strategy(self):
         """
         Calcola quanti campioni 1-img e 2-img usare per batch
@@ -135,7 +134,7 @@ class DistributedSamplerWithBluprint(DistributedSampler):
             return {"samples_1img": 0, "samples_2img": 1, "images_per_batch": 2}
         elif self.batch_size == 4:
             # Strategia: 3 campioni 2-img + 1 campione 1-img = 7 immagini totali
-            return {"samples_1img": 1, "samples_2img": 3, "images_per_batch": 7}
+            return {"samples_1img": 2, "samples_2img": 2, "images_per_batch": 7}
         else:
             # Strategia generale: cerca bilanciamento ottimale
             # Priorità ai campioni 2-img per efficienza memoria

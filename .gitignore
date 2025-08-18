@@ -37,3 +37,4 @@ bash/.DS_Store
 /activateEnv.sh
 /src/preprocess/mimic-cxr/radiology-report-extraction/
 /src/preprocess/mimic-cxr/mimic-cxr/
+/bash/

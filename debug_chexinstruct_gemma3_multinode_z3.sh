@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH -A NAISS2024-5-577
 #SBATCH -p alvis
-#SBATCH -N 2                        # two nodes
+#SBATCH -N 4                       # two nodes
 #SBATCH --ntasks-per-node=4          # one task per GPU
-#SBATCH --gpus-per-node=A100:4       # 4 GPUs per node
+#SBATCH --gpus-per-node=A40:4       # 4 GPUs per node
 #SBATCH --cpus-per-task=16
 #SBATCH -t 0-01:00:00               # Aumenta il timeout
 #SBATCH -J "gemma3_MN_debug_z3_normal"
@@ -12,6 +12,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ruffin02@outlook.it
 set -euo pipefail
+
 
 echo "=== Gemma3 Multi-Node Training (Direct SLURM Method) ==="
 echo "Job ID: $SLURM_JOB_ID"
@@ -73,7 +74,7 @@ echo "MASTER_ADDR=$MASTER_ADDR"
 echo "MASTER_PORT=$MASTER_PORT"
 echo "WORLD_SIZE=$WORLD_SIZE"
 # Configure NCCL with detected interface
-export NCCL_SOCKET_IFNAME=ib0 #"$NETWORK_INTERFACE"
+export NCCL_SOCKET_IFNAME="$NETWORK_INTERFACE"
 export NCCL_IB_DISABLE=0
 # TORCH
 export TORCH_DISTRIBUTED_DEBUG=INFO

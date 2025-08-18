@@ -50,6 +50,9 @@ export NCCL_SOCKET_IFNAME=ib0
 export NCCL_IB_DISABLE=0
 # TORCH
 export TORCH_DISTRIBUTED_DEBUG=INFO
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+
 # =============================================================================
 
 # Move to project directory

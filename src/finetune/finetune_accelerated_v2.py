@@ -5,11 +5,14 @@
 Fixed version of finetuning script for GEMMA3 or other causal language models using Accelerate with DeepSpeed Zero-2.
 This version addresses the "torch.cat(): expected a non-empty list of Tensors" error.
 """
+import gc
 import math
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Any, Callable
+
+import PIL.Image
 from tqdm import tqdm
 import os
 import json
@@ -24,7 +27,7 @@ from transformers import (
 )
 from accelerate import Accelerator
 from accelerate.state import DistributedType
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
 from transformers import get_scheduler
 # Suppress warnings
@@ -34,7 +37,7 @@ sys.path.extend(["./src", './'])
 from src.dataset import load_parquet_image_dataset
 from src.models import get_collator, configure_model_for_training
 from src.distributed import checkpoint_save_with_sync, safe_wait_for_everyone_simple
-from util_finetune import evaluate, DistributedSamplerWithBluprint, rank0_print, compute_SFT, compute_DFT
+from util_finetune import evaluate, DistributedSamplerWithBluprint, rank0_print, compute_SFT, compute_DFT, FakeVisionDataset
 
 # Environment setup
 cache_dir = os.path.join(os.getcwd(), "hf_cache")
@@ -625,6 +628,42 @@ def training_step(
 
     return loss.detach()
 
+def filter_existing_images_from_dataset(dataset, image_path_column="image_path"):
+    """
+    Filter dataset samples where image files don't exist
+
+    Args:
+        dataset: HuggingFace dataset
+        image_path_column: Column name containing image paths
+    """
+
+    def validate_image_exists(sample):
+        img_paths = sample.get(image_path_column, [])
+        if len(img_paths) == 0:
+            print(f"❌ Sample has no image paths specified in column '{image_path_column}'")
+            return False
+
+        if isinstance(img_paths, str):
+            img_paths = [img_paths]
+
+        # Check if ALL images exist
+        for path in img_paths:
+            if not os.path.exists(path):
+
+                print(f"❌ Sample has no image paths specified in column '{image_path_column}'")
+                return False
+        return True
+
+    # Filter and count
+    original_size = len(dataset)
+    filtered_dataset = dataset.filter(validate_image_exists, num_proc=16)
+    filtered_size = len(filtered_dataset)
+
+    print(f"Filtered dataset: {original_size} -> {filtered_size} samples")
+    print(f"Removed {original_size - filtered_size} samples with missing images")
+
+    return filtered_dataset
+
 def main():
     # Parse arguments with flexible handling
     model_args, data_args, training_args, remaining = parse_args_flexible()
@@ -662,6 +701,23 @@ def main():
     print("🔄 Loading datasets...")
     train_dataset, eval_dataset = load_and_prepare_datasets(data_args)
 
+
+    # ========== APPLY IMAGE FILTERING FIRST ==========
+    print("\n🔍 Filtering datasets for missing images...")
+
+
+    # Filter each split
+    train_dataset =  filter_existing_images_from_dataset(
+                train_dataset,
+                image_path_column="images"  # Adjust based on your column name
+        )
+
+    eval_dataset = filter_existing_images_from_dataset(
+                eval_dataset,
+                image_path_column="images"  # Adjust based on your column name
+        )
+    # ========== END IMAGE FILTERING ==========
+
     print("✅ Datasets loaded successfully")
 
     # CRITICAL: Setup model and LoRA BEFORE accelerator initialization
@@ -696,40 +752,57 @@ def main():
     # Create data loaders BEFORE accelerator initialization
     print("🔄 Creating data loaders...")
     try:
-
-        sampler_train = DistributedSamplerWithBluprint(
+        sampler_train = DistributedSampler(
                 train_dataset,
                 num_replicas=accelerator.num_processes,
                 rank=accelerator.process_index,
-                batch_size=training_args.per_device_train_batch_size,
-                lengths=train_dataset["length"],
-                n_images=train_dataset["n_of_images"],
                 shuffle=True,
                 drop_last=True
-
         )
+
+        # sampler_train = DistributedSamplerWithBluprint(
+        #         train_dataset,
+        #         num_replicas=accelerator.num_processes,
+        #         rank=accelerator.process_index,
+        #         batch_size=training_args.per_device_train_batch_size,
+        #         lengths=train_dataset["length"],
+        #         n_images=train_dataset["n_of_images"],
+        #         shuffle=True,
+        #         drop_last=True
+        #
+        # )
 
         train_dataloader = DataLoader(
                 train_dataset,
                 sampler=sampler_train,
                 collate_fn=collator,
-                drop_last=True,
                 batch_size=training_args.per_device_train_batch_size,
                 pin_memory=True
         )
 
+
         print(f"✅ Train dataloader created with {len(train_dataloader)} batches")
 
-        eval_sampler = DistributedSamplerWithBluprint(
+        # eval_sampler = DistributedSamplerWithBluprint(
+        #         eval_dataset,
+        #         num_replicas=accelerator.num_processes,
+        #         rank=accelerator.process_index,
+        #         batch_size=training_args.per_device_eval_batch_size,
+        #         lengths=eval_dataset["length"],
+        #         n_images=eval_dataset["n_of_images"],
+        #         shuffle=False,
+        #         drop_last=True
+        # )
+
+        eval_sampler = DistributedSampler(
                 eval_dataset,
                 num_replicas=accelerator.num_processes,
                 rank=accelerator.process_index,
-                batch_size=training_args.per_device_eval_batch_size,
-                lengths=eval_dataset["length"],
-                n_images=eval_dataset["n_of_images"],
                 shuffle=False,
                 drop_last=True
         )
+        print(f"✅ Eval sampler created with {len(eval_dataset)} samples")
+
 
         eval_dataloader = DataLoader(
                 eval_dataset,
@@ -740,7 +813,6 @@ def main():
                 pin_memory=True,
                 shuffle=False
         )
-
 
 
     except Exception as e:
@@ -884,14 +956,46 @@ def main():
             logger.warning(f"  Could not log scheduler details: {e}")
     # === LoRA + Gradient Checkpointing Safe Enable ===
     if training_args.debug:
-        # Debugging: Check if the dataloaders are correctly set up
-        for i, b in tqdm(enumerate(train_dataloader), desc="Checking train dataloader batches", total=len(train_dataloader)):
-            pixel_values = b['pixel_values']
-            #assert 'pixel_values' in b.keys(), f"Batch {i} does not contain 'pixel_values' key. Available keys: {b.keys()}"
-            # Debug: Check tensor shapes in the first batch
-            #print("🔄 Checking tensor shapes in the first batch only for images:")
-            if pixel_values.shape[0] != 7:
-                logger.warning(f" Batch {i} with pixel_values shape {pixel_values.shape}. Expected batch size of 7. -- device {pixel_values.device}")
+
+        dataset_train_dbg = FakeVisionDataset(n_images=train_dataset['n_of_images'], lenghts=train_dataset['length'])
+        """Test the adaptive sampler with different batch sizes."""
+        # Test with DataLoader
+        dataloader = DataLoader(
+                dataset_train_dbg,
+                sampler=sampler_train,
+                batch_size= training_args.per_device_train_batch_size,
+                collate_fn=lambda x: x,
+                pin_memory = True
+        )
+
+        # Analyze batches
+        batch_image_counts = []
+        batch_sample_counts = []
+        strategy_usage = {"primary": 0, "fallback": 0}
+
+        for i, batch in enumerate(dataloader):
+            total_images = sum(item['n_images'] for item in batch)
+            # if total_images != target:
+            print(f"Batch {i}: {len(batch)} samples, {total_images} images")
+            batch_image_counts.append(total_images)
+            batch_sample_counts.append(len(batch))
+            if total_images != 7:
+                logger.error(
+                    f"Batch {i} has {len(batch)} samples but {total_images} images (expected 7). "
+                    f"n_images: {[item['n_images'] for item in batch]}"
+                )
+            # Determine which strategy was used
+            count_1img = sum(1 for item in batch if item['n_images'] == 1)
+            count_2img = sum(1 for item in batch if item['n_images'] == 2)
+
+            print(f"Batch {i}: {len(batch)} samples, {total_images} images")
+            print(f"  Batch {i}: {count_2img}×2img + {count_1img}×1img = {total_images} images total")
+
+        # Validate results
+        unique_image_counts = set(batch_image_counts)
+        uniform_images = len(unique_image_counts) == 1
+
+
 
 
     # Initialize W&B run name
@@ -954,17 +1058,9 @@ def main():
                 else train_dataloader
         )
 
-
-        active_dataloader.sampler.set_epoch(epoch)
         for step, batch in enumerate(active_dataloader):
-            if step == 0 and training_args.debug:
-                # Debug: Check if the first batch is empty
-                if not batch or not isinstance(batch, dict) or 'pixel_values' not in batch:
-                    logger.error(f"First batch is empty or malformed: {batch.keys()}")
-                    raise ValueError("First batch is empty or malformed. Please check your dataset and collator.")
             pixel_values = batch['pixel_values']
-            if pixel_values.shape[0] != 7:
-                logger.warning(f" Batch {step} with pixel_values shape {pixel_values.shape}. Expected batch size of 7. -- device {pixel_values.device}")
+
             if accelerator.is_main_process:
                 logger.info(f"||||Step {step + 1} / {len(active_dataloader)} ||||  ")
             # Training step
@@ -973,6 +1069,7 @@ def main():
                 device = pixel_values.device
                 logger.info(f"[DEBUG] PIXEL_VALUES shape: {pixel_values.shape} on device: {device} || {completed_steps}")
             # Forward pass -->
+
             loss = training_step(
                     model=model,
                     batch=batch,
