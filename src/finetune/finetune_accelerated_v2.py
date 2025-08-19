@@ -1025,6 +1025,8 @@ def main():
         logger.info(f"  Total optimization steps = {training_args.max_train_steps}")
         logger.info(f"  Eval steps = {training_args.eval_steps}")
 
+
+
     # Resume handling
     starting_epoch = 0
     resume_step = None
@@ -1032,19 +1034,15 @@ def main():
     best_model_state = None
     if training_args.resume_from_checkpoint:
         accelerator.load_state(training_args.resume_from_checkpoint)
-        accelerator.print(f"Resumed from checkpoint: {training_args.resume_from_checkpoint}")
         path = os.path.basename(training_args.resume_from_checkpoint)
-        training_difference = os.path.splitext(path)[0]
+        training_difference = path.split("_")[-1]  # Extract the last part after the last hyphen
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
-        else:
-            resume_step = int(training_difference.replace("step_", ""))
-            starting_epoch = resume_step // num_update_steps_per_epoch
-            resume_step -= starting_epoch * num_update_steps_per_epoch
-            completed_steps = resume_step
+
+        starting_epoch = int(training_difference)
+        resume_step = None
+        completed_steps = (starting_epoch * num_update_steps_per_epoch) + 1
+        logger.info(f"  Resume from checkpoint: {training_args.resume_from_checkpoint}")
+        logger.info(f"  Starting epoch: {starting_epoch}, Completed steps: {completed_steps}")
 
     progress_bar.update(completed_steps)
     # Training loop
@@ -1216,14 +1214,13 @@ def main():
             if (training_args.checkpointing_strategy == 'epoch' and
                     isinstance(training_args.checkpointing_divider, int)):
                 if (epoch + 1) % training_args.checkpointing_divider == 0:
-                    save_path = os.path.join(training_args.output_dir, f"epoch_every_{epoch + 1}")
+                    save_path = os.path.join(training_args.output_dir, f"epoch_{epoch + 1}")
                     # Assicurati che la directory esista
 
                     checkpoint_save_with_sync(accelerator=accelerator,
                                               save_path=save_path)
 
                     logger.info(f"Saved periodic epoch checkpoint: {save_path} -- EPOCH {epoch + 1}")
-
 
             # Sincronizza dopo tutti i salvataggi
             safe_wait_for_everyone_simple(accelerator=accelerator)
