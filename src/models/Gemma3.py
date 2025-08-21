@@ -1,15 +1,18 @@
 import io
 import os
+import random
 from typing import Any, Dict, List
 
 import PIL
 import torch
 from PIL import Image, ImageFile
-from transformers import AutoProcessor
+from transformers import AutoProcessor, AutoTokenizer
+
 from .VisionLanguage import VisionLanguageDataCollator
 import threading
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 
 class GemmaCollator(VisionLanguageDataCollator):
@@ -425,3 +428,72 @@ def process_vision_info(messages: list[dict]) -> list[Image.Image]:
                     local_content_list.append(img.convert("RGB"))
         image_inputs.append(local_content_list)
     return image_inputs
+
+
+
+
+
+class GemmaInference(object):
+    def __init__(self, model_instance, test_args, tokenizer, processor, device="cuda:0"):
+        # step 1: Setup constant
+        self.dtype = torch.bfloat16
+        self.device = device
+        # step 2: Load Processor and Model
+        self.tokenizer = tokenizer
+        self.processor = processor
+
+        self.model = model_instance.to(self.dtype)
+        self.model.eval()
+
+
+
+    def generate(self,
+                 paths,
+                 prompt,
+                 num_beams=1,
+                 temperature=1.0,
+                 top_p=1.0,
+                 max_new_tokens=512):
+        # step 3: Inference
+        if not isinstance(paths, list):
+            paths = [paths]
+
+        # Load images
+        images = [Image.open(p.replace('png', 'jpg')).convert("RGB") for p in paths]
+
+        # Prepare inputs (text + images)
+        inputs = self.processor(
+                text=prompt,
+                images=images,
+                return_tensors="pt"
+        ).to(self.model.device)
+
+
+        # Generate output
+        output = self.model.generate(
+                **inputs,
+                do_sample=False,
+                num_beams=num_beams,
+                temperature=temperature,
+                top_p=top_p,
+                use_cache=True,
+                max_new_tokens=max_new_tokens
+        )
+
+        # Decode response
+        response = self.processor.batch_decode(output, skip_special_tokens=True)[0]
+
+        return response
+
+    def findings_generation(self, paths, indication):
+        assert isinstance(paths, list)
+        assert isinstance(indication, str)
+        prompt = [f'Given the indication: "{indication}", write a structured findings section for the CXR.', 'Examine the chest X-ray thoroughly and write an example findings section of the diagnostic report.'],
+        # Select random prompt from the list
+        prompt = random.choice(prompt)
+        response = self.generate(paths, prompt)
+        return response
+
+
+
+

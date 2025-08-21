@@ -357,7 +357,6 @@ def load_and_prepare_datasets(data_args):
 
     return raw_datasets["train"], raw_datasets["val"]
 
-
 def setup_model_and_config(model_args, training_args, data_args):
     """Setup model configuration and load the model."""
     assert model_args.model_name_or_path, "You need to specify a model name or path"
@@ -664,6 +663,8 @@ def filter_existing_images_from_dataset(dataset, image_path_column="image_path")
 
     return filtered_dataset
 
+
+
 def main():
     # Parse arguments with flexible handling
     model_args, data_args, training_args, remaining = parse_args_flexible()
@@ -706,17 +707,17 @@ def main():
     print("\n🔍 Filtering datasets for missing images...")
 
 
-    # Filter each split
-    train_dataset =  filter_existing_images_from_dataset(
-                train_dataset,
-                image_path_column="images"  # Adjust based on your column name
-        )
-
-    eval_dataset = filter_existing_images_from_dataset(
-                eval_dataset,
-                image_path_column="images"  # Adjust based on your column name
-        )
-    # ========== END IMAGE FILTERING ==========
+    # # Filter each split
+    # train_dataset =  filter_existing_images_from_dataset(
+    #             train_dataset,
+    #             image_path_column="images"  # Adjust based on your column name
+    #     )
+    #
+    # eval_dataset = filter_existing_images_from_dataset(
+    #             eval_dataset,
+    #             image_path_column="images"  # Adjust based on your column name
+    #     )
+    # # ========== END IMAGE FILTERING ==========
 
     print("✅ Datasets loaded successfully")
 
@@ -759,6 +760,7 @@ def main():
                 shuffle=True,
                 drop_last=True
         )
+
 
         # sampler_train = DistributedSamplerWithBluprint(
         #         train_dataset,
