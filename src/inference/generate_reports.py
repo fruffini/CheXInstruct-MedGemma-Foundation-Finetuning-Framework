@@ -124,6 +124,10 @@ def test():
     # constant
     rexrank_dir = "modules/ReXrank/data"
 
+
+    # Load chexinstruct data
+
+
     chexpert_plus_test_data = os.path.join(rexrank_dir, "chexpert_plus/ReXRank_CheXpertPlus.json")
     iu_xray_test_data = os.path.join(rexrank_dir, "iu_xray/ReXRank_IUXray_test.json")
     mimic_cxr_test_data = os.path.join(rexrank_dir, "mimic-cxr/ReXRank_MIMICCXR_test.json")
@@ -187,10 +191,11 @@ def test():
                            processor=processor,
                            tokenizer=processor.tokenizer)
     accelerator.wait_for_everyone()
-    data_dict = {"chexpert-data": chexpert_data, 'openi':iu_xray_data, 'mimic-cxr':mimic_cxr_data}
+    data_dict = {"chexpert-public": chexpert_data, 'openi':iu_xray_data, 'mimic-cxr':mimic_cxr_data}
     to_be_replaced = {
         "chexpert-public": {'valid': 'valid-512'},
     }
+
     # inference
     results = []
     for dataset_name, dataset in data_dict.items():
