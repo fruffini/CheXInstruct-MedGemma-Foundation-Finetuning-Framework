@@ -110,7 +110,6 @@ srun bash -c '  # 3 ore di timeout
 
 
 
-
         --deepspeed_config_file '"$ACCELERATE_CONFIG_FILE"' \
         --model_name_or_path "google/gemma-3-4b-it" \
 
