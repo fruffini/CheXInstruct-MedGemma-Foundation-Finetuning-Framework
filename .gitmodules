@@ -7,3 +7,6 @@
 [submodule "modules/GREEN"]
 	path = modules/GREEN
 	url = https://github.com/Stanford-AIMI/GREEN.git
+[submodule "modules/Gemma3-Finetune"]
+	path = modules/Gemma3-Finetune
+	url = https://github.com/2U1/Gemma3-Finetune.git

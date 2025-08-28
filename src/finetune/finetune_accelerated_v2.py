@@ -5,14 +5,14 @@
 Fixed version of finetuning script for GEMMA3 or other causal language models using Accelerate with DeepSpeed Zero-2.
 This version addresses the "torch.cat(): expected a non-empty list of Tensors" error.
 """
+import ast
 import gc
 import math
 import warnings
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Any, Callable
 
-import PIL.Image
+from accelerate import Accelerator
 from tqdm import tqdm
 import os
 import json
@@ -21,24 +21,29 @@ from accelerate.utils import DummyOptim, DummyScheduler
 import torch
 import transformers
 from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    HfArgumentParser,
+    BitsAndBytesConfig, Gemma3ForConditionalGeneration
 )
-from accelerate import Accelerator
+
 from accelerate.state import DistributedType
 from torch.utils.data import DataLoader, DistributedSampler
 
 from transformers import get_scheduler
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.trainer_pt_utils import get_parameter_names
+
+from src.finetune.monkey_patch_forward import replace_gemma3_forward
+from src.params import ModelArguments, DataArguments, CustomTrainingArguments
+
 # Suppress warnings
 warnings.filterwarnings("ignore")
 import sys
 sys.path.extend(["./src", './'])
 from src.dataset import load_parquet_image_dataset
 from src.models import get_collator, configure_model_for_training
-from src.distributed import checkpoint_save_with_sync, safe_wait_for_everyone_simple
-from util_finetune import evaluate, DistributedSamplerWithBluprint, rank0_print, compute_SFT, compute_DFT, FakeVisionDataset
+from src.distributed import checkpoint_save_with_sync, safe_wait_for_everyone_simple, initialize_accelerator_safely
+from util_finetune import evaluate, rank0_print, compute_SFT, compute_DFT, FakeVisionDataset
 
+from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_gemma3_text
 # Environment setup
 cache_dir = os.path.join(os.getcwd(), "hf_cache")
 os.environ["HF_DATASETS_CACHE"] = cache_dir
@@ -49,274 +54,6 @@ CACHE_DIR = os.path.join(os.getcwd(), "hf_models_cache")
 
 logger = logging.getLogger(__name__)
 hf_token = os.environ.get("HF_TOKEN", "")
-
-
-@dataclass
-class ModelArguments:
-    model_name_or_path: Optional[str] = field(
-            default="google/gemma-3-4b-it",
-            metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models."}
-    )
-    caching_local: bool = field(default=True, metadata={"help": "Whether to cache the model locally."})
-    model_class_name: Optional[str] = field(
-            default=None,
-            metadata={"help": "Used to init model class, format is XXXXForCausalLM. e.g. currently XXXX is chosen from LlavaLlama, LlavaMixtral, LlavaMistral, Llama"}
-    )
-
-    mm_tunable_parts: Optional[str] = field(
-            default=None,
-            metadata={"help": 'Could be "mm_mlp_adapter", "mm_vision_resampler", "mm_vision_tower,mm_mlp_adapter,mm_language_model", etc.'}
-    )
-    freeze_backbone: bool = field(default=False)
-
-    mm_projector_type: Optional[str] = field(default="linear")
-    mm_use_im_start_end: bool = field(default=False)
-    mm_use_im_patch_token: bool = field(default=True)
-    mm_patch_merge_type: Optional[str] = field(default="flat")
-    mm_resampler_type: Optional[str] = field(default=None)
-    mm_spatial_pool_stride: Optional[int] = field(default=None)
-    mm_spatial_pool_mode: str = field(default="bilinear")
-    mm_spatial_pool_out_channels: Optional[int] = field(default=None)
-    rope_scaling_factor: Optional[float] = field(default=None)
-    rope_scaling_type: Optional[str] = field(default=None)
-    use_pos_skipping: Optional[bool] = field(default=False)
-    pos_skipping_range: Optional[int] = field(default=2048)
-    mm_newline_position: Optional[str] = field(default="grid")
-
-
-
-
-@dataclass
-class DataArguments:
-    dataset_name: Optional[str] = field(
-            default=None,
-            metadata={"help": "The name of the dataset to use (via the datasets library - or - local function for parquet chexinstruct)."}
-    )
-    dataset_dir: Optional[str] = field(
-            default=None,
-            metadata={"help": "Path to a directory containing the dataset files in .parquet format."}
-    )
-    data_path: str = field(
-            default=None,
-            metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"}
-    )
-    lazy_preprocess: bool = False
-    is_multimodal: bool = False
-    early_mix_text: bool = False
-    image_folder: Optional[str] = field(default=None)
-    image_aspect_ratio: str = "square"
-    image_grid_pinpoints: Optional[str] = field(default=None)
-    image_crop_resolution: Optional[int] = field(default=None)
-    image_split_resolution: Optional[int] = field(default=None)
-    data_debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode with fewer epochs and smaller batch size."})
-    preprocessing_num_workers: Optional[int] = field(
-            default=None,
-            metadata={"help": "The number of processes to use for the preprocessing."}
-    )
-    cache_dir: Optional[str] = field(default=CACHE_DIR, metadata={"help": "Path to a directory where the model will be cached."})
-
-
-@dataclass
-class CustomTrainingArguments:
-    # Basic training arguments
-    deepspeed_config_file: str = field(default="./configs/deepspeed_zero2.json", metadata={"help": "Path to the DeepSpeed Zero-2 configuration file."})
-    output_dir: str = field(default="./results", metadata={"help": "Output directory for model predictions and checkpoints."})
-    num_train_epochs: float = field(default=3.0, metadata={"help": "Total number of training epochs to perform."})
-    per_device_train_batch_size: int = field(default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training."})
-    per_device_eval_batch_size: int = field(default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."})
-    learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
-    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
-    seed: Optional[int] = field(default=None, metadata={"help": "Random seed that will be set at the beginning of training."})
-
-    # Model configuration
-    model_max_length: int = field(
-            default=2048,
-            metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
-    )
-    attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
-
-    # LoRA/PEFT configuration
-    lora_enable: bool = field(default=True, metadata={"help": "Whether to enable LoRA training."})
-    lora_r: int = field(default=64, metadata={"help": "Rank for LoRA layers."})
-    lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha."})
-    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout."})
-    lora_weight_path: str = field(default="", metadata={"help": "Path to LoRA weights."})
-    lora_bias: str = field(default="none", metadata={"help": "LoRA bias."})
-    peft_strategy: str = field(default="lora_gaussian", metadata={"help": "PEFT strategy to use."})
-
-    # Training configuration
-    max_train_steps: Optional[int] = field(default=None, metadata={"help": "Total number of training steps to perform. If provided, overrides num_train_epochs."})
-    bf16: bool = field(default=False, metadata={"help": "Whether to use bfloat16 mixed precision."})
-    loss_function: str = field(default="default", metadata={"help": "Loss function to use. Options: default, SFT or DFT."})
-
-
-
-    # Scheduler configuration
-    lr_scheduler_type: str = field(default="linear", metadata={"help": "The scheduler type to use. Options: linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup, or cyclic."})
-    warmup_min_lr: float = field(default=0.0, metadata={"help": "Warmup minimum learning rate."})
-    num_warmup_steps: int = field(default=None, metadata={"help": "Number of warmup steps for the learning rate scheduler."})
-    cycle_min_lr: float = field(default=1e-7, metadata={"help": "Minimum learning rate for cyclical learning rate scheduler."})
-    total_num_steps: Optional[int] = field( default=None, metadata={"help": "Total number of steps for the learning rate scheduler."})
-    warmup_ratio: float = field(default=0.01, metadata={"help": "Warmup ratio for the learning rate scheduler."})
-
-    # Optimizer configuration
-    adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer."})
-    adam_beta2: float = field(default=0.99, metadata={"help": "Beta2 for AdamW optimizer."})
-    adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
-
-
-    # Multimodal training configuration
-    finetune_vision_layers: bool = field(default=False, metadata={"help": "Whether to finetune the vision layers."})
-    finetune_language_layers: bool = field(default=True, metadata={"help": "Whether to finetune the language layers."})
-    finetune_attention_modules: bool = field(default=True, metadata={"help": "Whether to finetune the attention modules."})
-    finetune_mlp_modules: bool = field(default=True, metadata={"help": "Whether to finetune the MLP modules."})
-
-    # Training configuration
-    verbose_logging: bool = field(default=False, metadata={"help": "Whether to enable verbose logging."})
-    gradient_accumulation_steps: int = field(default=1, metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."})
-
-    # Checkpointing and saving
-    checkpointing_strategy: Optional[str] = field(default='epoch', metadata={"help": "Checkpointing steps, can be 'epoch', 'steps', or a number of steps."})
-    checkpointing_divider: Optional[int] = field(default=1, metadata={"help": "Checkpointing steps, can be 'epoch', 'steps', or a number of steps."})
-    resume_from_checkpoint: Optional[str] = field(default=None, metadata={"help": "Path to checkpoint to resume from."})
-
-    # Evaluation and best model
-    load_best_model: bool = field(default=True, metadata={"help": "Whether to load the best model at the end of training."})
-    eval_steps: int = field(default=None, metadata={"help": "Evaluate every n steps."})
-    # W&B integration
-    report_to: str = field(default="wandb")
-    with_tracking: bool = field(default=True, metadata={"help": "Whether to use tracking for the training run."})
-    lr: float = field(default=2e-4, metadata={"help": "Learning rate for the optimizer."})
-    debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode with fewer epochs and smaller batch size."})
-
-    @property
-    def train_batch_size(self) -> int:
-        """Total effective batch size for training."""
-        return self.per_device_train_batch_size * self.gradient_accumulation_steps
-
-
-# Replace the accelerator initialization section in your finetune_accelerated_v2.py
-# Around line 551 where the error occurs
-
-def initialize_accelerator_safely(training_args):
-    """
-    Initialize accelerator with proper error handling for SLURM + TorchRun.
-    """
-    import os
-    import time
-    import random
-
-    if "LOCAL_RANK" in os.environ and "RANK" in os.environ:
-        print("🔄 Detected TorchRun environment, using simple accelerator initialization...")
-
-        # Simple initialization that works with torchrun
-        accelerator = Accelerator(
-                gradient_accumulation_steps=training_args.gradient_accumulation_steps,
-                log_with=training_args.report_to if training_args.with_tracking else None,
-                project_dir=training_args.output_dir,
-                mixed_precision="bf16" if training_args.bf16 else "fp16",
-                split_batches=False,
-
-        )
-        print("✅ TorchRun accelerator initialized successfully")
-        return accelerator
-
-
-    # Fallback for accelerate launch (with retry logic)
-    max_retries = 5
-    base_delay = 5
-
-    for attempt in range(max_retries):
-        try:
-            print(f"🔄 Initializing Accelerator (attempt {attempt + 1}/{max_retries})...")
-
-            # Add a small random delay to prevent simultaneous initialization
-            if attempt > 0:
-                delay = base_delay + random.uniform(0, 5)
-                print(f"⏳ Waiting {delay:.1f}s before retry...")
-                time.sleep(delay)
-
-            accelerator = Accelerator(
-                    gradient_accumulation_steps=training_args.gradient_accumulation_steps,
-                    log_with=training_args.report_to if training_args.with_tracking else None,
-                    project_dir=training_args.output_dir,
-                    mixed_precision="bf16" if training_args.bf16 else "fp16",
-                    split_batches=False,
-
-            )
-
-            print("✅ Accelerator initialized successfully")
-            return accelerator
-
-        except Exception as e:
-            print(f"❌ Attempt {attempt + 1} failed: {e}")
-
-            if "EADDRINUSE" in str(e) or "address already in use" in str(e):
-                print("🔍 Port conflict detected, will retry with delay...")
-                if attempt == max_retries - 1:
-                    print("💡 Try running: pkill -f 'python.*finetune' to clean up any hanging processes")
-                    raise RuntimeError(
-                            "Failed to initialize accelerator after multiple attempts. "
-                            "This is likely due to port conflicts from previous runs. "
-                            "Please check for hanging processes and try again."
-                    )
-            else:
-                # For non-port related errors, fail immediately
-                raise
-
-    raise RuntimeError("Failed to initialize accelerator after all retries")
-
-
-
-# Then in your main() function, replace this line:
-# accelerator = Accelerator(...)
-#
-# With:
-# accelerator = initialize_accelerator_safely(training_args)
-def parse_args_flexible():
-    """
-    Flexible argument parsing that handles missing arguments gracefully.
-    """
-    parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
-
-    # Check if we're running from command line with arguments
-    import sys
-    if len(sys.argv) > 1:
-        try:
-            return parser.parse_args_into_dataclasses(return_remaining_strings=True)
-        except Exception as e:
-            logger.warning(f"Failed to parse command line arguments: {e}")
-            logger.info("Falling back to default arguments")
-
-    # Use defaults if no command line args or parsing failed
-    return ModelArguments(), DataArguments(), CustomTrainingArguments(), []
-
-
-
-def debug_tensor_shapes(model, prefix=""):
-    """Debug function to identify empty tensors that might cause issues."""
-    empty_tensors = []
-    total_params = 0
-    trainable_params = 0
-
-    for name, param in model.named_parameters():
-        total_params += param.numel()
-        if param.requires_grad:
-            trainable_params += param.numel()
-
-        if hasattr(param, 'shape') and any(dim == 0 for dim in param.shape):
-            empty_tensors.append((name, param.shape))
-            print(f"❌ EMPTY TENSOR: {prefix}{name}: {param.shape}")
-        elif param.requires_grad:
-            print(f"✅ TRAINABLE: {prefix}{name}: {param.shape}")
-
-    print(f"\n📊 Parameter Summary:")
-    print(f"   Total parameters: {total_params:,}")
-    print(f"   Trainable parameters: {trainable_params:,}")
-    print(f"   Trainable %: {100 * trainable_params / total_params:.2f}%")
-
-    return empty_tensors
-
 
 def setup_logging(training_args):
     """Setup logging configuration."""
@@ -357,54 +94,90 @@ def load_and_prepare_datasets(data_args):
 
     return raw_datasets["train"], raw_datasets["val"]
 
-def setup_model_and_config(model_args, training_args, data_args):
+
+def set_requires_grad(parameters, requires_grad):
+    for p in parameters:
+        p.requires_grad = requires_grad
+
+
+def configure_vision_tower(model, training_args, compute_dtype, device):
+    vision_tower = model.vision_tower
+    vision_tower.to(dtype=compute_dtype, device=device)
+
+    img_projection_params = model.multi_modal_projector.parameters()
+    set_requires_grad(img_projection_params, not training_args.freeze_projector)
+
+    vision_model_params = vision_tower.parameters()
+    set_requires_grad(vision_model_params, not training_args.freeze_vision_tower)
+
+    if training_args.bits in [4, 8]:
+        model.model.vision_embed_tokens.img_processor.to(dtype=compute_dtype, device=device)
+
+
+def configure_llm(model, training_args):
+    llm_params = model.language_model.parameters()
+    set_requires_grad(llm_params, not training_args.freeze_llm)
+
+
+def setup_model_and_config(model_args, training_args, device, computedtype, bnb_model_from_pretrained_args={}, compute_dtype=torch.float16):
     """Setup model configuration and load the model."""
     assert model_args.model_name_or_path, "You need to specify a model name or path"
-
-    # Attention implementation check
-    if training_args.attn_implementation == "sdpa" and torch.__version__ < "2.1.2":
-        raise ValueError("The 'sdpa' attention implementation requires torch version 2.1.2 or higher.")
 
     # Configuration overrides
     customized_kwargs = dict()
     overwrite_config = {}
-    cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    # cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    #
+    # if overwrite_config:
+    #     for k, v in overwrite_config.items():
+    #         setattr(cfg_pretrained, k, v)
+    #     customized_kwargs["config"] = cfg_pretrained
 
-    if overwrite_config:
-        for k, v in overwrite_config.items():
-            setattr(cfg_pretrained, k, v)
-        customized_kwargs["config"] = cfg_pretrained
 
     # Load model
     print("🔄 Loading base model...")
-    model = AutoModelForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            cache_dir=data_args.cache_dir,
-            torch_dtype=torch.bfloat16,  # Use bfloat16 for better stability
-            **customized_kwargs
-    )
+    if 'gemma' in model_args.model_name_or_path.lower():
+        model = Gemma3ForConditionalGeneration.from_pretrained(
+                    model_args.model_id,
+                    torch_dtype=compute_dtype,
+                    cache_dir=training_args.cache_dir,
+                    attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "eager",
+                    **bnb_model_from_pretrained_args
+            )
     # TEST
-    training_args.layer_to_unfreeze = ["lm_head", "multi_modal_projector"]
     print("✅ Base model loaded successfully")
 
 
+    model_to_configure = model
+    configure_llm(model_to_configure, training_args)
+    configure_vision_tower(model_to_configure, training_args, compute_dtype, device)
+    model.config.use_cache = False
+
+    if training_args.bits in [4, 8]:
+        model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+        from peft import prepare_model_for_kbit_training
+        # This is a workaround for a bug in the current implementation of gradient checkpointing
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing, gradient_checkpointing_kwargs={"use_reentrant": True})
+
+    if training_args.gradient_checkpointing:
+        model.enable_input_require_grads()
+        # This is a workaround for a bug in the current implementation of gradient checkpointing
+        training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
+
     # CRITICAL: Configure PEFT/LoRA BEFORE any other operations
     if training_args.lora_enable:
+        lora_namespan_exclude = training_args.lora_namespan_exclude
         print("🔄 Applying LoRA configuration...")
 
         model = configure_model_for_training(
                 model,
-                strategy=training_args.peft_strategy,
                 r=training_args.lora_r,
                 lora_alpha=training_args.lora_alpha,
                 lora_dropout=training_args.lora_dropout,
                 bias=training_args.lora_bias,
-                layer_to_unfreeze=training_args.layer_to_unfreeze,
-                finetune_vision_layers=training_args.finetune_vision_layers,
-                finetune_language_layers=training_args.finetune_language_layers,
-                finetune_attention_modules=training_args.finetune_attention_modules,
-                finetune_mlp_modules=training_args.finetune_mlp_modules,
+                lora_namespan_exclude=lora_namespan_exclude,
+                training_args=training_args,
+
         )
 
         # Verify that we have trainable parameters
@@ -414,11 +187,6 @@ def setup_model_and_config(model_args, training_args, data_args):
 
         print(f"✅ LoRA applied successfully with {len(trainable_params)} trainable parameter groups")
 
-    # # Disable gradient checkpointing to avoid conflicts with DeepSpeed
-    # if hasattr(model, 'gradient_checkpointing_enable'):
-    #     model.gradient_checkpointing_disable()
-
-    # Set hidden size for compatibility
     try:
         model.config.hidden_size = model.model.language_model.embed_tokens.embedding_dim
     except:
@@ -436,69 +204,55 @@ def create_optimizers_with_parameter_groups(model, training_args, accelerator):
     print("🔄 Creating optimizer with parameter groups...")
 
     # Separate LoRA parameters from base model parameters
-    lora_params = []
-    base_params = []
-    no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight"]
+    decay_parameters = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
+    decay_parameters = [name for name in decay_parameters if "bias" not in name]
+    lr_mapper = {}
+    if training_args.projector_lr is not None:
+        lr_mapper["multi_modal_projector"] = training_args.projector_lr
+    if training_args.vision_lr is not None:
+        lr_mapper["vision_tower"] = training_args.vision_lr
 
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if 'lora_A' in name or 'lora_B' in name or 'lora_embedding_A' in name or 'lora_embedding_B' in name:
-                lora_params.append((name, param))
-            else:
-                base_params.append((name, param))
 
-    print(f"📊 Parameter breakdown:")
-    print(f"   LoRA parameters: {len(lora_params)}")
-    print(f"   Base parameters: {len(base_params)}")
+    if len(lr_mapper) > 0:
+        special_lr_parameters = [name for name, _ in model.named_parameters() if any(module_keyword in name for module_keyword in lr_mapper)]
+        optimizer_grouped_parameters = [
+                {
+                        "params"      : [p for n, p in model.named_parameters() if (n in decay_parameters and n not in special_lr_parameters and p.requires_grad)],
+                        "weight_decay": training_args.weight_decay,
+                },
+                {
+                        "params"      : [p for n, p in model.named_parameters() if (n not in decay_parameters and n not in special_lr_parameters and p.requires_grad)],
+                        "weight_decay": 0.0,
+                },
+        ]
+        for module_keyword, lr in lr_mapper.items():
+            module_parameters = [name for name, _ in model.named_parameters() if module_keyword in name]
+            optimizer_grouped_parameters.extend(
+                    [
+                            {
+                                    "params"      : [p for n, p in model.named_parameters() if (n in decay_parameters and n in module_parameters and p.requires_grad)],
+                                    "weight_decay": training_args.weight_decay,
+                                    "lr"          : lr,
+                            },
+                            {
+                                    "params"      : [p for n, p in model.named_parameters() if (n not in decay_parameters and n in module_parameters and p.requires_grad)],
+                                    "weight_decay": 0.0,
+                                    "lr"          : lr,
+                            },
+                    ]
+            )
+    else:
+        optimizer_grouped_parameters = [
+                {
+                        "params"      : [p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)],
+                        "weight_decay": training_args.weight_decay,
+                },
+                {
+                        "params"      : [p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)],
+                        "weight_decay": 0.0,
+                },
+        ]
 
-    # Create parameter groups with proper filtering
-    optimizer_grouped_parameters = []
-
-    # LoRA parameters (typically no weight decay)
-    if lora_params:
-        lora_params_wd = [p for n, p in lora_params if not any(nd in n for nd in no_decay)]
-        lora_params_no_wd = [p for n, p in lora_params if any(nd in n for nd in no_decay)]
-
-        if lora_params_wd:
-            optimizer_grouped_parameters.append({
-                    "params"      : lora_params_wd,
-                    "weight_decay": training_args.weight_decay * 0.1,  # Reduced weight decay for LoRA
-                    "lr"          : training_args.learning_rate,
-            })
-
-        if lora_params_no_wd:
-            optimizer_grouped_parameters.append({
-                    "params"      : lora_params_no_wd,
-                    "weight_decay": 0.0,
-                    "lr"          : training_args.learning_rate,
-            })
-
-    # Base model parameters (if any are trainable)
-    if base_params:
-        base_params_wd = [p for n, p in base_params if not any(nd in n for nd in no_decay)]
-        base_params_no_wd = [p for n, p in base_params if any(nd in n for nd in no_decay)]
-
-        if base_params_wd:
-            optimizer_grouped_parameters.append({
-                    "params"      : base_params_wd,
-                    "weight_decay": training_args.weight_decay,
-                    "lr"          : training_args.learning_rate * 0.1,  # Lower LR for base params
-            })
-
-        if base_params_no_wd:
-            optimizer_grouped_parameters.append({
-                    "params"      : base_params_no_wd,
-                    "weight_decay": 0.0,
-                    "lr"          : training_args.learning_rate * 0.1,
-            })
-
-    # Verify we have parameter groups
-    if not optimizer_grouped_parameters:
-        raise RuntimeError("❌ No parameter groups created for optimizer!")
-
-    # Count total parameters in groups
-    total_params_in_groups = sum(len(group["params"]) for group in optimizer_grouped_parameters)
-    print(f"📊 Created {len(optimizer_grouped_parameters)} parameter groups with {total_params_in_groups} total parameters")
 
 
     optimizer_cls = (
@@ -511,8 +265,23 @@ def create_optimizers_with_parameter_groups(model, training_args, accelerator):
                               lr=training_args.learning_rate,
                               eps=training_args.adam_epsilon,
                               betas=(training_args.adam_beta1, training_args.adam_beta2))
+    if optimizer_cls.__name__ == "Adam8bit":
+        import bitsandbytes
+
+        manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
+
+        skipped = 0
+        for module in model.modules():
+            import torch.nn as nn
+            if isinstance(module, nn.Embedding):
+                skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
+                logger.info(f"skipped {module}: {skipped / 2 ** 20}M params")
+                manager.register_module_override(module, "weight", {"optim_bits": 32})
+                logger.debug(f"bitsandbytes: will optimize {module} in fp32")
+        logger.info(f"skipped: {skipped / 2 ** 20}M params")
 
     # Create learning rate scheduler
+
 
     if (
             accelerator.state.deepspeed_plugin is None
@@ -531,22 +300,6 @@ def create_optimizers_with_parameter_groups(model, training_args, accelerator):
         )
     print("✅ Optimizer and scheduler created successfully")
     return optimizer, lr_scheduler
-
-
-def call_forward_dummy(dummy_inputs, model, device="cuda"):
-    model.train()
-
-    # Copia e manda su GPU tutti i tensori
-    dummy = {k: (v.to(device) if hasattr(v, "to") else v)
-             for k, v in dummy_inputs.items()}
-
-    # Aggiungi labels dummy per calcolare la loss
-    dummy["labels"] = dummy["input_ids"].clone()
-
-    # Esegui forward
-    out = model(**dummy)
-    loss = out.loss
-    return loss
 
 
 def save_complete_checkpoint(
@@ -627,109 +380,97 @@ def training_step(
 
     return loss.detach()
 
-def filter_existing_images_from_dataset(dataset, image_path_column="image_path"):
-    """
-    Filter dataset samples where image files don't exist
 
-    Args:
-        dataset: HuggingFace dataset
-        image_path_column: Column name containing image paths
-    """
-
-    def validate_image_exists(sample):
-        img_paths = sample.get(image_path_column, [])
-        if len(img_paths) == 0:
-            print(f"❌ Sample has no image paths specified in column '{image_path_column}'")
-            return False
-
-        if isinstance(img_paths, str):
-            img_paths = [img_paths]
-
-        # Check if ALL images exist
-        for path in img_paths:
-            if not os.path.exists(path):
-
-                print(f"❌ Sample has no image paths specified in column '{image_path_column}'")
-                return False
-        return True
-
-    # Filter and count
-    original_size = len(dataset)
-    filtered_dataset = dataset.filter(validate_image_exists, num_proc=16)
-    filtered_size = len(filtered_dataset)
-
-    print(f"Filtered dataset: {original_size} -> {filtered_size} samples")
-    print(f"Removed {original_size - filtered_size} samples with missing images")
-
-    return filtered_dataset
-
-
-
-def main():
+def train():
     # Parse arguments with flexible handling
-    model_args, data_args, training_args, remaining = parse_args_flexible()
+    parser = transformers.HfArgumentParser(
+            (ModelArguments, DataArguments, CustomTrainingArguments))
 
-    print("🚀 Starting DeepSpeed Zero-[2/3] Training with LoRA")
-    print("=" * 60)
+    model_args, data_args, training_args, remaining = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
+    if training_args.use_liger:
+        apply_liger_kernel_to_gemma3_text(
+            rope=True, cross_entropy=False, fused_linear_cross_entropy=False, rms_norm=True, geglu=True
+        )
     # Setup logging
     setup_logging(training_args)
-    print("✅ Logging setup completed")
-    training_args.output_dir += "lora" + str(training_args.lora_r) + "_alpha" + str(training_args.lora_alpha) if training_args.lora_enable else ""
+    rank0_print("✅ Logging setup completed")
 
+    # Replace GEMMA3 forward method if using Liger
+    replace_gemma3_forward(use_liger=training_args.use_liger)
+
+    training_args.output_dir += "lora" + str(training_args.lora_r) + "_alpha" + str(training_args.lora_alpha) if training_args.lora_enable else ""
     training_args.output_dir += f"_{training_args.loss_function}" if training_args.loss_function != "default" else "_vanilla"
 
     os.makedirs(training_args.output_dir, exist_ok=True)
 
+    if training_args.lora_enable and not training_args.freeze_llm:
+        raise ValueError("If `lora_enable` is True, `freeze_llm` must also be True.")
+
+    if training_args.vision_lora and not training_args.freeze_vision_tower:
+        raise ValueError("If `vision_lora` is True, `freeze_vision_tower` must also be True.")
+
+
+    if not training_args.lora_enable:
+        assert not training_args.vision_lora, \
+            "Error: training_args.lora_enable is not enabled, but training_args.vision_lora is enabled."
+
+    if training_args.lora_namespan_exclude is not None:
+        training_args.lora_namespan_exclude = ast.literal_eval(training_args.lora_namespan_exclude)
+    else:
+        training_args.lora_namespan_exclude = ["multi_modal_projector"]
+
+    if not training_args.vision_lora:
+        training_args.lora_namespan_exclude += ["vision_tower", "multi_modal_projector"]
+
+    # Compute dtype
+    compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+
 
     # NOW initialize accelerator with DeepSpeed config
     accelerator = initialize_accelerator_safely(training_args=training_args)
-    print("✅ Accelerator initialized successfully")
-
-    # Verbose logging
-    if training_args.verbose_logging:
-        rank0_print(f"Inspecting experiment hyperparameters:\n")
-        rank0_print(f"model_args = {vars(model_args)}\n")
-        rank0_print(f"data_args = {vars(data_args)}\n")
-        rank0_print(f"training_args = {vars(training_args)}\n")
-
+    rank0_print("Accelerator initialized successfully")
+    bnb_model_from_pretrained_args = {}
+    if training_args.bits in [4, 8]:
+        bnb_model_from_pretrained_args.update(dict(
+                quantization_config=BitsAndBytesConfig(
+                        device=accelerator.device,
+                        load_in_4bit=training_args.bits == 4,
+                        load_in_8bit=training_args.bits == 8,
+                        llm_int8_skip_modules=["vision_tower", "multi_modal_projector"],
+                        llm_int8_threshold=6.0,
+                        llm_int8_has_fp16_weight=False,
+                        bnb_4bit_compute_dtype=compute_dtype,
+                        bnb_4bit_use_double_quant=training_args.double_quant,
+                        bnb_4bit_quant_type=training_args.quant_type,
+                )
+        ))
 
     # Set seed for reproducibility
     if training_args.seed is not None:
         transformers.set_seed(training_args.seed)
 
     # Load datasets
-    print("🔄 Loading datasets...")
+    rank0_print("🔄 Loading datasets...")
     train_dataset, eval_dataset = load_and_prepare_datasets(data_args)
+    rank0_print("✅ Datasets loaded successfully")
 
-
-    # ========== APPLY IMAGE FILTERING FIRST ==========
-    print("\n🔍 Filtering datasets for missing images...")
-
-
-    # # Filter each split
-    # train_dataset =  filter_existing_images_from_dataset(
-    #             train_dataset,
-    #             image_path_column="images"  # Adjust based on your column name
-    #     )
-    #
-    # eval_dataset = filter_existing_images_from_dataset(
-    #             eval_dataset,
-    #             image_path_column="images"  # Adjust based on your column name
-    #     )
-    # # ========== END IMAGE FILTERING ==========
-
-    print("✅ Datasets loaded successfully")
 
     # CRITICAL: Setup model and LoRA BEFORE accelerator initialization
-    print("🔄 Setting up model with LoRA...")
+    rank0_print("Setting up model with LoRA...")
+
+
     # Ensure model_args is not None
     accelerator.wait_for_everyone()
     model = setup_model_and_config(
             model_args=model_args,
             training_args=training_args,
-            data_args=data_args
+            bnb_model_from_pretrained_args=bnb_model_from_pretrained_args,
+            compute_dtype=compute_dtype,
+            device=accelerator.device,
     )
+
+
     accelerator.wait_for_everyone()
     print("✅ Model and LoRA setup completed")
     # Get collator and tokenizer
@@ -740,6 +481,8 @@ def main():
             token=hf_token
     )
 
+    model.config.vision_lr = training_args.vision_lr
+    model.config.projector_lr = training_args.projector_lr
 
     processor = collator.processor
     tokenizer = collator.tokenizer if hasattr(collator, 'tokenizer') else processor
@@ -821,10 +564,12 @@ def main():
         logger.error(f"❌ Error creating data loaders: {e}")
         raise
 
-    #batch
+    # Test eval dataloader
+    _ = next(iter(eval_dataloader))
+    print(f"✅ Eval dataloader created with {len(eval_dataloader)} batches")
     # _size_real = training_args.per_device_train_batch_size * accelerator.num_processes
     len_total_dataloader = len(train_dataloader)
-    # CORREZIONE: Calcolo corretto degli step
+    # CORREZIONE: Calcolo corretto degl i step
     num_update_steps_per_epoch = math.ceil( len_total_dataloader / training_args.gradient_accumulation_steps)
     if training_args.max_train_steps is None:
         training_args.max_train_steps = int(training_args.num_train_epochs * num_update_steps_per_epoch)
@@ -1305,4 +1050,4 @@ def main():
     logger.info("|/| May the force be with you! Training completed successfully.")
 
 if __name__ == "__main__":
-    main()
+    train()

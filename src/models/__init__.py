@@ -119,7 +119,6 @@ def get_model(model_id: str, **kwargs):
 # Esempio di utilizzo:
 def  configure_model_for_training(
         model,
-        strategy: str = "lora_gaussian",
         **kwargs
 ):
     """
@@ -128,16 +127,9 @@ def  configure_model_for_training(
     Args:
         model: Il modello da configurare
         strategy: Strategia di fine-tuning:
-            - "lora_standard": LoRA con inizializzazione Kaiming-uniform
-            - "lora_gaussian": LoRA con inizializzazione Gaussiana
-            - "lora_pissa": LoRA con inizializzazione PiSSA
-            - "lora_pissa_fast": LoRA con inizializzazione PiSSA veloce
-            - "lora_olora": LoRA con inizializzazione OLoRA
-            - "dora": DoRA (Weight-Decomposed LoRA)
-            - "dora_rslora": DoRA con rank-stabilized LoRA
-            - "qlora": QLoRA-style (all-linear)
-            - "manual_adapter": Adapter manuale (sblocca layer specifici)
-            - "modules_to_save": LoRA con moduli aggiuntivi da salvare
+            - 'lora': Applica LoRA al modello
+            - 'full': Addestra tutti i parametri del modello
+            - 'freeze': Congela tutti i parametri del modello
         **kwargs: Parametri aggiuntivi per la configurazione
 
     Returns:

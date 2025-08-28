@@ -94,6 +94,9 @@ class CustomInferenceArguments:
 
     # Inference configuration
     num_beams: int = field(default=1, metadata={"help": "Number of beams for beam search."})
+    temperature: float = field(default=1.0, metadata={"help": "Temperature for sampling."})
+    top_p: float = field(default=0.9, metadata={"help": "Top-p (nucleus) sampling."})
+    max_new_tokens: int = field(default=512, metadata={"help": "Maximum number of new tokens to generate."})
 
     # W&B integration
     report_to: str = field(default="wandb")
@@ -142,6 +145,8 @@ def test():
     save_dir = os.path.join(test_args.output_dir, "predictions", "Findings Generation")
     # load benchmark
 
+
+
     accelerator = Accelerator()
 
     """Setup model configuration and load the model."""
@@ -179,6 +184,15 @@ def test():
                                               padding="max_length",
                                               truncation=True,
                                               )
+
+
+    from safetensors.torch import load_file
+    # 2. Load safetensors weights
+    state_dict = load_file("/mimer/NOBACKUP/groups/naiss2023-6-336/Deep-Sick/reports/finetune_gemma_findings_zero3lora64_alpha64_vanilla/epoch_every_3/model.safetensors")
+    state_dict = {k.replace('base_model.model.', ''):v for k, v in state_dict.items()}
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     processor.tokenizer.padding_side = "right"
 
@@ -214,9 +228,14 @@ def test():
 
             text = model.generate(
                     os.path.join(data_path, dataset_name, sample["key_image_path"].replace(list(to_be_replaced[dataset_name].keys())[0],list(to_be_replaced[dataset_name].values())[0])),
-                    f'Examine the chest X-ray thoroughly and write an example findings section of the diagnostic report.',
-                    num_beams=test_args.num_beams
+                    f'Evaluate the chest X-rays',
+                    num_beams=test_args.num_beams,
+                    temperature=test_args.temperature,
+                    top_p=test_args.top_p,
+                    max_new_tokens=test_args.max_new_tokens,
             )
+
+
             results.append({
                     "sample_idx"        : sample_idx,
                     "patient_id"        : patient_id,

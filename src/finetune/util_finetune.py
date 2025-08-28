@@ -42,6 +42,9 @@ def evaluate(training_args, model, eval_dataloader, accelerator, logger):
     model.eval()
     losses = []
     for step, batch in enumerate(eval_dataloader):
+
+        if step <= 2:
+            pass
         if accelerator.is_main_process:
             logger.info(f"||||Step {step + 1} / {len(eval_dataloader)} ||||")
         with torch.no_grad():
@@ -51,6 +54,7 @@ def evaluate(training_args, model, eval_dataloader, accelerator, logger):
         losses.append(accelerator.gather_for_metrics(loss.repeat(training_args.per_device_eval_batch_size)))
 
     losses = torch.cat(losses)
+
 
 
     try:

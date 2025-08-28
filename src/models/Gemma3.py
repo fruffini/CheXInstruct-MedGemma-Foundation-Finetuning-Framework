@@ -12,7 +12,7 @@ from .VisionLanguage import VisionLanguageDataCollator
 import threading
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
+from copy import deepcopy
 
 
 class GemmaCollator(VisionLanguageDataCollator):
@@ -36,6 +36,8 @@ class GemmaCollator(VisionLanguageDataCollator):
 
 
         self.image_tkn = image_tkn
+        self.user_token = "user"
+        self.assistant_token = "model"
         self.system = False
         self.max_l = 0
         self.max_length = max_length
@@ -50,13 +52,10 @@ class GemmaCollator(VisionLanguageDataCollator):
             self._cache_size = cache_size
 
         processor = AutoProcessor.from_pretrained(model_id,
-                                                  use_fast=True,
-                                                  max_length=max_length,
-                                                  padding="max_length",
-                                                  truncation=True,
                                                   **kwargs)
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
         processor.tokenizer.padding_side = "right"
+
         #processor.image_processor.size = {"height": 512, "width": 512} TODO Adjust size if needed (512x512)
         super().__init__(processor)
 
@@ -324,6 +323,28 @@ class GemmaCollator(VisionLanguageDataCollator):
                 return new_prompt
 
 
+
+    def make_labels(self, input_ids: torch.Tensor, ASSISTANT_TOKEN_ID, ) -> torch.Tensor:
+        labels = deepcopy(input_ids)
+        # Mask everything until (and including) the assistant role token
+        if ASSISTANT_TOKEN_ID is not None:
+            for i in range(labels.size(0)):
+                seq = labels[i]
+                # find the first assistant role token
+                idx = (seq == ASSISTANT_TOKEN_ID).nonzero(as_tuple=True)[0]
+                start = int(idx[0].item()) + 1 if len(idx) > 0 else labels.size(1)
+                # mask user/system/context
+                seq[:start] = -100
+        else:
+            # Fallback: if you cannot find a role token, at least mask everything before the last image token
+            IMG_ID = self.processor.tokenizer.convert_tokens_to_ids("<image>")
+            for i in range(labels.size(0)):
+                seq = labels[i]
+                pos = (seq == IMG_ID).nonzero(as_tuple=True)[0]
+                start = int(pos[-1].item()) + 1 if len(pos) > 0 else labels.size(1)
+                seq[:start] = -100
+        return labels
+
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Process batch for LLaVA - mantiene la logica originale"""
         text_prompt = [el.get('texts', None) for el in batch]
@@ -356,7 +377,8 @@ class GemmaCollator(VisionLanguageDataCollator):
         )
 
         # Encode texts and images into tensors
-        labels = batch["input_ids"].clone()
+        ASSYSTANT_TOKEN_ID = self.processor.tokenizer.convert_tokens_to_ids(self.assistant_token)
+        labels = self.make_labels(batch['input_ids'])
         image_token_id = [
                 self.processor.tokenizer.convert_tokens_to_ids(
                         self.processor.tokenizer.special_tokens_map["boi_token"]
@@ -453,37 +475,50 @@ class GemmaInference(object):
                  num_beams=1,
                  temperature=1.0,
                  top_p=1.0,
-                 max_new_tokens=512):
-        # step 3: Inference
+                 max_new_tokens=512,
+                 **kwargs):
         if not isinstance(paths, list):
             paths = [paths]
 
         # Load images
+
+
+        # Load images
+
         images = [Image.open(p.replace('png', 'jpg')).convert("RGB") for p in paths]
 
-        # Prepare inputs (text + images)
-        inputs = self.processor(
-                text=prompt,
-                images=images,
-                return_tensors="pt"
-        ).to(self.model.device)
+        list_content = [{'image': i, 'text': None, 'type': 'image'} for i in images]
+        list_content.append({'image': None, 'text': prompt, 'type': 'text'})
+
+        conv = \
+            [{'content':
+              list_content, 'role': 'user'}
+            ]
+        text = self.processor.apply_chat_template(conv,
+                                                   tokenize=False,
+                                                   add_generation_promt=True,
+                                                   return_tensors="pt")
+        # Calcola lunghezze (ottimizzato per batch)
+        tokenized_lengths = []
+        input_ids = self.tokenizer(text,
+                                   add_special_tokens=False,
+                                   return_tensors="pt")['input_ids'].to(self.model.device)
 
 
-        # Generate output
         output = self.model.generate(
-                **inputs,
+                input_ids,
                 do_sample=False,
                 num_beams=num_beams,
-                temperature=temperature,
+                temperature=1.0,
                 top_p=top_p,
                 use_cache=True,
                 max_new_tokens=max_new_tokens
-        )
+        )[0]
 
-        # Decode response
-        response = self.processor.batch_decode(output, skip_special_tokens=True)[0]
 
-        return response
+        response = self.tokenizer.decode(output[input_ids.size(1):-1])
+
+        return response.strip()
 
     def findings_generation(self, paths, indication):
         assert isinstance(paths, list)

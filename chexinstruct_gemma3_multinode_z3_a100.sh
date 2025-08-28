@@ -107,33 +107,63 @@ srun bash -c '  # 3 ore di timeout
 
   # Run the training script directly (no accelerate launcher)
   python src/finetune/finetune_accelerated_v2.py \
+
+
+
+
         --deepspeed_config_file '"$ACCELERATE_CONFIG_FILE"' \
         --model_name_or_path "google/gemma-3-4b-it" \
+
+        --output_dir '"$OUTPUT_DIR"' \
+
         --dataset_name "chexinstruct" \
         --dataset_dir "data_chexinstruct/hf_parquet_gemma_format/gemma_3_findings" \
-        --output_dir '"$OUTPUT_DIR"' \
-        --learning_rate 2e-4 \
-        --lr_scheduler_type "cosine_with_restarts" \
-        --per_device_train_batch_size '"$BATCH"' \
-        --per_device_eval_batch_size '"$BATCH"' \
+        --lazy_preprocess True \
+
         --num_train_epochs '"$EPOCHS"' \
         --report_to wandb \
         --preprocessing_num_workers 1 \
-        --weight_decay 0.0001 \
-        --warmup_ratio 0.01 \
-        --model_max_length 1500 \
+
+        --per_device_train_batch_size '"$BATCH"' \
+        --per_device_eval_batch_size '"$BATCH"' \
+
+
+        --lr_scheduler_type "cosine_with_restarts" \
+        --num_cycles 4 \
+
+        --learning_rate 1e-4 \
+        --projector_lr 1e-5 \
+        --vision_lr 2e-6 \
+
+        --weight_decay 0.1 \
+        --warmup_ratio 0.03 \
+        --adam_beta2 0.95 \
+
+        --model_max_length 2048 \
+        --lora_namespan_exclude "['lm_head', 'embed_tokens']" \
+        --num_lora_modules -1 \
         --lora_enable true \
+        --lora_rank 64 \
         --lora_alpha 64 \
-        --lora_r 64 \
+        --lora_dropout 0.05 \
+        --freeze_projector False \
+        --freeze_vision_tower False \
+        --freeze_llm True \
+
         --gradient_checkpointing true \
-        --peft_strategy "lora_gaussian" \
+        --use_liger True \
         --gradient_accumulation_steps '"$GRADIENT_ACCUMULATION_STEPS"' \
+
         --eval_steps '"$EVAL_STEPS"' \
         --checkpointing_strategy epoch \
         --checkpointing_divider 1 \
         --load_best_model true \
+        --verbose false \
         --verbose_logging false \
-        --bf16 true \
+        --bf16 True \
+        --fp16 False \
+        --tf32 True \
+
         --debug false
 '
 exit_code=$?
