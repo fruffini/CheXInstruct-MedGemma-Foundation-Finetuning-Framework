@@ -31,13 +31,14 @@ from transformers import get_scheduler
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_pt_utils import get_parameter_names
 
-from src.finetune.monkey_patch_forward import replace_gemma3_forward
-from src.params import ModelArguments, DataArguments, CustomTrainingArguments
-
 # Suppress warnings
 warnings.filterwarnings("ignore")
 import sys
 sys.path.extend(["./src", './'])
+
+from src.finetune.monkey_patch_forward import replace_gemma3_forward
+from src.params import ModelArguments, DataArguments, CustomTrainingArguments
+
 from src.dataset import load_parquet_image_dataset
 from src.models import get_collator, configure_model_for_training
 from src.distributed import checkpoint_save_with_sync, safe_wait_for_everyone_simple, initialize_accelerator_safely
@@ -119,7 +120,7 @@ def configure_llm(model, training_args):
     set_requires_grad(llm_params, not training_args.freeze_llm)
 
 
-def setup_model_and_config(model_args, training_args, device, computedtype, bnb_model_from_pretrained_args={}, compute_dtype=torch.float16):
+def setup_model_and_config(model_args, training_args, device, bnb_model_from_pretrained_args={}, compute_dtype=torch.float16):
     """Setup model configuration and load the model."""
     assert model_args.model_name_or_path, "You need to specify a model name or path"
 
@@ -138,20 +139,21 @@ def setup_model_and_config(model_args, training_args, device, computedtype, bnb_
     print("🔄 Loading base model...")
     if 'gemma' in model_args.model_name_or_path.lower():
         model = Gemma3ForConditionalGeneration.from_pretrained(
-                    model_args.model_id,
+                    model_args.model_name_or_path,
                     torch_dtype=compute_dtype,
-                    cache_dir=training_args.cache_dir,
+                    cache_dir=CACHE_DIR,
                     attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "eager",
                     **bnb_model_from_pretrained_args
             )
     # TEST
-    print("✅ Base model loaded successfully")
 
+    print("✅ Base model loaded successfully")
 
     model_to_configure = model
     configure_llm(model_to_configure, training_args)
     configure_vision_tower(model_to_configure, training_args, compute_dtype, device)
     model.config.use_cache = False
+
 
     if training_args.bits in [4, 8]:
         model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
@@ -372,6 +374,7 @@ def training_step(
             outputs = model(**batch)
             loss = outputs.loss
 
+
     # Normalize loss unless DeepSpeed handles it
     if accelerator.distributed_type != DistributedType.DEEPSPEED:
         loss = loss / gradient_accumulation_steps
@@ -387,6 +390,11 @@ def train():
             (ModelArguments, DataArguments, CustomTrainingArguments))
 
     model_args, data_args, training_args, remaining = parser.parse_args_into_dataclasses(return_remaining_strings=True)
+
+    rank0_print(f"model_args: {model_args}")
+    rank0_print(f"data_args: {data_args}")
+    rank0_print(f"training_args: {training_args}")
+
 
     if training_args.use_liger:
         apply_liger_kernel_to_gemma3_text(
@@ -415,9 +423,7 @@ def train():
         assert not training_args.vision_lora, \
             "Error: training_args.lora_enable is not enabled, but training_args.vision_lora is enabled."
 
-    if training_args.lora_namespan_exclude is not None:
-        training_args.lora_namespan_exclude = ast.literal_eval(training_args.lora_namespan_exclude)
-    else:
+    if training_args.lora_namespan_exclude is None:
         training_args.lora_namespan_exclude = ["multi_modal_projector"]
 
     if not training_args.vision_lora:
@@ -466,7 +472,6 @@ def train():
             model_args=model_args,
             training_args=training_args,
             bnb_model_from_pretrained_args=bnb_model_from_pretrained_args,
-            compute_dtype=compute_dtype,
             device=accelerator.device,
     )
 
@@ -767,11 +772,9 @@ def train():
         logger.info(f"  Num examples = {len(train_dataset)}")
         logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
         logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {training_args.train_batch_size}")
         logger.info(f"  Gradient Accumulation steps = {training_args.gradient_accumulation_steps}")
         logger.info(f"  Total optimization steps = {training_args.max_train_steps}")
         logger.info(f"  Eval steps = {training_args.eval_steps}")
-
 
 
     # Resume handling
@@ -783,7 +786,6 @@ def train():
         accelerator.load_state(training_args.resume_from_checkpoint)
         path = os.path.basename(training_args.resume_from_checkpoint)
         training_difference = path.split("_")[-1]  # Extract the last part after the last hyphen
-
 
         starting_epoch = int(training_difference)
         resume_step = None

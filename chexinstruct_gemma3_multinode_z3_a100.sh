@@ -128,7 +128,6 @@ srun bash -c '  # 3 ore di timeout
 
 
         --lr_scheduler_type "cosine_with_restarts" \
-        --num_cycles 4 \
 
         --learning_rate 1e-4 \
         --projector_lr 1e-5 \
@@ -148,11 +147,11 @@ srun bash -c '  # 3 ore di timeout
         --freeze_projector False \
         --freeze_vision_tower False \
         --freeze_llm True \
-
+        --disable_flash_attn2 True \
         --gradient_checkpointing true \
         --use_liger True \
         --gradient_accumulation_steps '"$GRADIENT_ACCUMULATION_STEPS"' \
-
+        --disable_flash_attn2 True \
         --eval_steps '"$EVAL_STEPS"' \
         --checkpointing_strategy epoch \
         --checkpointing_divider 1 \

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 import os
 
 
@@ -96,7 +96,10 @@ class CustomTrainingArguments:
     peft_strategy: str = field(default="lora_gaussian", metadata={"help": "PEFT strategy to use."})
     num_lora_modules: int = -1
 
-    lora_namespan_exclude: str = field(default=None, metadata={"help": "List of namespan to exclude for LoRA"})
+    lora_namespan_exclude: Optional[List[str]] = field(
+        default_factory=list,
+        metadata={"help": "Layers to exclude"}
+    )
     use_liger: bool = field(default=False, metadata={"help": "Whether to use liger kernel."})
 
 
@@ -140,7 +143,7 @@ class CustomTrainingArguments:
     # Training configuration
     verbose_logging: bool = field(default=False, metadata={"help": "Whether to enable verbose logging."})
     gradient_accumulation_steps: int = field(default=1, metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."})
-
+    gradient_checkpointing: bool = field(default=False, metadata={"help": "Whether to use gradient checkpointing to save memory at the expense of slower backward pass."})
     # Checkpointing and saving
     checkpointing_strategy: Optional[str] = field(default='epoch', metadata={"help": "Checkpointing steps, can be 'epoch', 'steps', or a number of steps."})
     checkpointing_divider: Optional[int] = field(default=1, metadata={"help": "Checkpointing steps, can be 'epoch', 'steps', or a number of steps."})

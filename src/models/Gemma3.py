@@ -1,7 +1,7 @@
 import io
 import os
 import random
-from typing import Any, Dict, List
+from typing import Any, Dict, List, re
 
 import PIL
 import torch
@@ -13,7 +13,13 @@ import threading
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 from copy import deepcopy
-
+from src.constants import (
+    DEFAULT_START_TOKEN,
+    DEFAULT_END_TOKEN,
+    IGNORE_INDEX,
+    VISION_START_TOKEN,
+    VISION_END_TOKEN, LLAVA_IMAGE_TOKEN, DEFAULT_IMAGE_TOKEN
+)
 
 class GemmaCollator(VisionLanguageDataCollator):
     """
@@ -331,7 +337,7 @@ class GemmaCollator(VisionLanguageDataCollator):
             for i in range(labels.size(0)):
                 seq = labels[i]
                 # find the first assistant role token
-                idx = (seq == ASSISTANT_TOKEN_ID).nonzero(as_tuple=True)[0]
+                idx = (seq == ASSISTANT_TOKEN_ID[0]).nonzero(as_tuple=True)[0]
                 start = int(idx[0].item()) + 1 if len(idx) > 0 else labels.size(1)
                 # mask user/system/context
                 seq[:start] = -100
@@ -345,11 +351,15 @@ class GemmaCollator(VisionLanguageDataCollator):
                 seq[:start] = -100
         return labels
 
+    def replace_image_tokens(self, input_string):
+        pattern = r'\n?' + re.escape(LLAVA_IMAGE_TOKEN) + r'\n?'
+        replacement = "\n\n" + VISION_START_TOKEN + DEFAULT_IMAGE_TOKEN * 256 + VISION_END_TOKEN + "\n\n"
+
+        return re.sub(pattern, replacement, input_string)
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Process batch for LLaVA - mantiene la logica originale"""
         text_prompt = [el.get('texts', None) for el in batch]
         formatted_messages = [el.get('formatted_messages', None) for el in batch]
-
 
 
         images = process_vision_info(formatted_messages)
@@ -376,15 +386,17 @@ class GemmaCollator(VisionLanguageDataCollator):
                 max_length=self.max_length
         )
 
+
+
         # Encode texts and images into tensors
-        ASSYSTANT_TOKEN_ID = self.processor.tokenizer.convert_tokens_to_ids(self.assistant_token)
-        labels = self.make_labels(batch['input_ids'])
+        input_ids = batch["input_ids"]
+        labels = self.make_labels(input_ids, ASSISTANT_TOKEN_ID=self.processor.tokenizer.convert_tokens_to_ids({self.assistant_token}))
+
         image_token_id = [
                 self.processor.tokenizer.convert_tokens_to_ids(
                         self.processor.tokenizer.special_tokens_map["boi_token"]
                 )
         ]
-
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
         labels[labels == image_token_id] = -100
         labels[labels == 262144] = -100

@@ -22,6 +22,7 @@ def initialize_accelerator_safely(training_args):
                 split_batches=False,
 
         )
+
         print("✅ TorchRun accelerator initialized successfully")
         return accelerator
 
