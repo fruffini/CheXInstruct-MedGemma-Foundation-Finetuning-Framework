@@ -95,6 +95,8 @@ class CustomTrainingArguments:
     projector_lr: Optional[float] = field(default=None, metadata={"help": "LoRA learning rate."})
     peft_strategy: str = field(default="lora_gaussian", metadata={"help": "PEFT strategy to use."})
     num_lora_modules: int = -1
+    regex_module: bool = field(default=False, metadata={"help": "Whether to use regex to match module names for LoRA."})
+
 
     lora_namespan_exclude: Optional[List[str]] = field(
         default_factory=list,

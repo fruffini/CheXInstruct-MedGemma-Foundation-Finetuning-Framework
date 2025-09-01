@@ -34,6 +34,7 @@ class GemmaCollator(VisionLanguageDataCollator):
             max_length: int = 1500,
             enable_image_cache: bool = True,
             cache_size: int = 10000,
+            padding_side: str = "left",
             use_fast_validation: bool = True,
             image_tkn: str = "<start_of_image>",
             **kwargs: Any
@@ -51,6 +52,7 @@ class GemmaCollator(VisionLanguageDataCollator):
         self.enable_image_cache = enable_image_cache
         self.use_fast_validation = use_fast_validation
 
+
         # Cache per validazione immagini
         if enable_image_cache:
             self._path_cache = {}
@@ -58,13 +60,15 @@ class GemmaCollator(VisionLanguageDataCollator):
             self._cache_size = cache_size
 
         processor = AutoProcessor.from_pretrained(model_id,
+                                                  use_fast=True,
+                                                  max_length=max_length,
+                                                  padding="max_length",
+                                                  truncation=True,
                                                   **kwargs)
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        processor.tokenizer.padding_side = "right"
+        processor.tokenizer.padding_side = padding_side
 
-        #processor.image_processor.size = {"height": 512, "width": 512} TODO Adjust size if needed (512x512)
         super().__init__(processor)
-
 
 
 

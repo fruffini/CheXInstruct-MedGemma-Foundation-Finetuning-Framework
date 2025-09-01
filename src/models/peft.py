@@ -138,7 +138,16 @@ class DeepSpeedCompatibleModelParameterManager:
             ):
         assert model is not None, "Model cannot be None"
         self.training_args = training_args
-        self.target_modules = find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules)
+        if self.training_args.regex_module:
+            self.target_modules = get_peft_regex(
+                    model,
+                    finetune_vision_layers= (not training_args.freeze_vision_tower and training_args.vision_lora),
+                    finetune_language_layers= not training_args.freeze_llm,
+                    finetune_attention_modules=True,
+                    finetune_mlp_modules=True,
+            )
+        else:
+            self.target_modules = find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules)
 
     def return_target_modules(self):
         """Return the target modules for LoRA."""
