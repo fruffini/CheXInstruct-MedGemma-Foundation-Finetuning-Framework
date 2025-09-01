@@ -38,3 +38,4 @@ bash/.DS_Store
 /src/preprocess/mimic-cxr/radiology-report-extraction/
 /src/preprocess/mimic-cxr/mimic-cxr/
 /bash/
+modules/Gemma3-Finetune
