@@ -281,32 +281,34 @@ bash src/download/rex-gradient160k/download_rexgrad160k.sh
 
 All images are resized to 512×512 px and stored as PNG/JPG. The table below describes the dataset layout as downloaded.
 
-| Dataset | Access | Key files / folders | Format |
-|---|---|---|---|
-| **MIMIC-CXR-JPG** | PhysioNet (credentialed) | `mimic-cxr/files_512/`, `mimic-cxr-2.0.0-split.csv`, `mimic-cxr-reports/` | JPG 512px |
-| **CheXpert** | Stanford (free registration) | `chexpert-public/train-512/`, `valid-512/`, `test-512/`, `train.csv`, `valid.csv` | JPG 512px |
-| **VinDr-CXR** | Kaggle / PhysioNet | `vindr-cxr/train_png/`, `test_png/`, `annotations_train.csv`, `annotations_test.csv` | PNG 512px |
-| **BRAX** | Public (GCS) | `brax/images-512/`, `brax_train_both_cleaned.csv`, `brax_test_both_cleaned.csv` | JPG 512px |
-| **OpenI** | Public (NLM) | `openi/images-512/`, `indiana_reports.csv`, `indiana_projections.csv` | PNG 512px |
-| **ChestX-ray14** | Public (NIH) | `chestxray14/images-512/`, `Data_Entry_2017.csv`, `BBox_List_2017.csv` | PNG 512px |
-| **MS-CXR** | PhysioNet (credentialed) | `ms-cxr/1.0.0/`, `MS_CXR_Local_Alignment_v1.1.0.csv` | JPG 512px |
-| **MS-CXR-T** | PhysioNet (credentialed) | `ms-cxr-t/`, `MS_CXR_T_temporal_image_classification_v1.0.0.csv`, `MS_CXR_T_temporal_sentence_similarity_v1.0.0.csv` | JPG 512px |
-| **COVIDx-CXR-3** | Public (Kaggle) | `covidx-cxr-3/images-512/`, `train.txt`, `val.txt`, `test.txt` | PNG 512px |
-| **CXR-LT** | Public (MIMIC subset) | `cxr-lt/cxr-lt-2023/`, `cxr-lt-2024/`, `train.csv`, `test.csv` | JPG 512px |
-| **Object-CXR** | Public | `object-cxr/train/`, `dev/`, `train.csv`, `dev.csv` | JPG 512px |
-| **NLM-TB** | Public (NLM) | `nlm-tb/TB_Chest_Radiography_Database/` | PNG |
-| **SIIM-ACR** | Kaggle | `siim/SIIM-ACR-Pneumothorax-original/` | DICOM / PNG |
-| **RSNA Pneumonia** | Kaggle | `rsna/stage_2_train_images_png/`, `stage_2_test_images/`, `stage_2_train_labels.csv` | PNG |
-| **RadGraph** | PhysioNet (credentialed) | `radgraph/train.json`, `dev.json`, `test.json` | JSON annotations |
-| **RadNLI** | Public | `radnli/radnli_dev_v1.jsonl`, `radnli_test_v1.jsonl` | JSONL |
-| **Rad-ReStruct** | Public | `Rad-ReStruct/train/`, `data/` | JSON + images |
-| **Rex-Gradient-160K** | HuggingFace (gated) | `rex-gradient160k/deid_png/` | PNG (de-identified) |
-| **VinDr-PCXR** | PhysioNet | `vindr-pcxr/` | PNG 512px |
-| **MIMIC-CXR VQA** | PhysioNet (credentialed) | `mimiccxrvqa/`, `mimic-diff-vqa/`, `mimic-ext-mimic-cxr-vqa/` | JSON + MIMIC images |
-| **MIMIC-NLE** | PhysioNet (credentialed) | `mimic-nle/` | JSON |
-| **RadQA** | Public | `radqa/` | JSON |
-| **CheXBench** | Public | `chexbench/metadata/` | JSON |
-| **ReXVal** | Public | `rexval/` | JSON |
+| Dataset | Access | Images | Size on disk | Key files / folders |
+|---|---|---|---|---|
+| **MIMIC-CXR-JPG** | PhysioNet (credentialed) | ~227,827 | 20 GB | `mimic-cxr/files_512/`, `mimic-cxr-2.0.0-split.csv`, `mimic-cxr-reports/` |
+| **CheXpert** | Stanford (free reg.) | ~224,316 | 36 GB | `chexpert-public/train-512/`, `valid-512/`, `test-512/`, `train.csv` |
+| **ChestX-ray14** | Public (NIH) | 112,120 | 13 GB | `chestxray14/images-512/`, `Data_Entry_2017.csv`, `BBox_List_2017.csv` |
+| **Rex-Gradient-160K** | HuggingFace (gated) | ~160,000 | 146 GB | `rex-gradient160k/deid_png/` |
+| **COVIDx-CXR-3** | Public (Kaggle) | 58,856 | 6.6 GB | `covidx-cxr-3/images-512/`, `train.txt`, `val.txt`, `test.txt` |
+| **RSNA Pneumonia** | Kaggle | 56,368 | 7.1 GB | `rsna/stage_2_train_images_png/`, `stage_2_train_labels.csv` |
+| **VinDr-PCXR** | PhysioNet | 9,124 | 37 GB | `vindr-pcxr/` |
+| **Object-CXR** | Public | 9,000 | 13 GB | `object-cxr/train/`, `dev/`, `train.csv`, `dev.csv` |
+| **OpenI** | Public (NLM) | 7,470 | 909 MB | `openi/images-512/`, `indiana_reports.csv`, `indiana_projections.csv` |
+| **SIIM-ACR Pneumothorax** | Kaggle | 3,205 | 6.0 GB | `siim/SIIM-ACR-Pneumothorax-original/` |
+| **VinDr-CXR** | PhysioNet / Kaggle | 18,000 | 3.8 GB | `vindr-cxr/train_png/`, `test_png/`, `annotations_train.csv` |
+| **NLM-TB** | Public (NLM) | 4,200 | 671 MB | `nlm-tb/TB_Chest_Radiography_Database/` |
+| **BRAX** | Public (GCS) | ~40,967 | 5.0 GB | `brax/images-512/`, `brax_train_both_cleaned.csv` |
+| **MS-CXR** | PhysioNet (credentialed) | MIMIC subset | 308 KB | `ms-cxr/1.0.0/MS_CXR_Local_Alignment_v1.1.0.csv` |
+| **MS-CXR-T** | PhysioNet (credentialed) | MIMIC subset | 256 KB | `ms-cxr-t/MS_CXR_T_temporal_image_classification_v1.0.0.csv` |
+| **CXR-LT** | Public (MIMIC subset) | MIMIC subset | 377 MB | `cxr-lt/cxr-lt-2023/`, `cxr-lt-2024/`, `train.csv` |
+| **RadGraph** | PhysioNet (credentialed) | — (text) | 796 MB | `radgraph/train.json`, `dev.json`, `test.json` |
+| **RadNLI** | Public | — (text) | 20 MB | `radnli/radnli_dev_v1.jsonl`, `radnli_test_v1.jsonl` |
+| **Rad-ReStruct** | Public | — | 2.1 GB | `Rad-ReStruct/train/`, `data/` |
+| **MIMIC-CXR VQA** | PhysioNet (credentialed) | MIMIC subset | 717 MB | `mimiccxrvqa/`, `mimic-diff-vqa/`, `mimic-ext-mimic-cxr-vqa/` |
+| **MIMIC-NLE** | PhysioNet (credentialed) | MIMIC subset | 20 MB | `mimic-nle/` |
+| **RadQA** | Public | — (text) | 3.8 MB | `radqa/` |
+| **CheXBench** | Public | — | 128 MB | `chexbench/metadata/` |
+| **ReXVal** | Public | — | 456 KB | `rexval/` |
+
+> Total storage: ~300 GB. The largest single dataset is Rex-Gradient-160K (146 GB). MIMIC-CXR images are shared across MIMIC-derived tasks (MS-CXR, MS-CXR-T, CXR-LT, MIMIC VQA, MIMIC-NLE).
 
 ### 3. Preprocess images
 
