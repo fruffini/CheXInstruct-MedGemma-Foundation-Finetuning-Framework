@@ -24,7 +24,7 @@ def download_images_files():
 
     repo_id = 'rajpurkarlab/ReXGradient-160K'
 
-    hf_token = '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'
+    hf_token = os.environ.get("HF_TOKEN", "")
     ids_files = range(10)
     for i in tqdm(ids_files):
 

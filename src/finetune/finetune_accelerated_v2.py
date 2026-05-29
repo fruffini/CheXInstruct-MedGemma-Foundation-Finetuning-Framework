@@ -718,7 +718,7 @@ def train():
         run_name = f'{model_args.model_name_or_path.split("/")[-1]}-finetuning-{training_args.peft_strategy}-date-{datetime.now().strftime("%Y-%m-%d")}-epoch-{training_args.num_train_epochs}-bs-{training_args.per_device_train_batch_size}'
         os.environ["WANDB_PROJECT"] = project_name  # project in W&B UI
         os.environ["WANDB_RUN_NAME"] = run_name  # run name in W&B UI
-        os.environ["WANDB_NAME"] = run_name  # alternative alias for run name        [0, 0, 0,  ..., 0, 0, 0]]), 'pixel_values': tensor([[[[-1., -1., -1.,  ..., -1., -1., -1.],
+        os.environ["WANDB_NAME"] = run_name
 
     # Progress bar setup
     progress_bar = tqdm(range(training_args.max_train_steps), disable=not accelerator.is_local_main_process)

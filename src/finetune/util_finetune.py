@@ -492,7 +492,7 @@ if __name__ == "__main__":
     CACHE_DIR = os.path.join(os.getcwd(), "hf_models_cache")
 
     data_args = dict(
-            dataset_dir="/Users/filruff/Desktop/PHD/PROGETTI/Deep-Sick/data_chexinstruct/hf_parquet_gemma_format/gemma_3_findings",
+            dataset_dir=os.environ.get("DATASET_DIR", "data_chexinstruct/hf_parquet_gemma_format/gemma_3_findings"),
             cache_dir=CACHE_DIR,
             data_debug=False,
             preprocessing_num_workers=1,

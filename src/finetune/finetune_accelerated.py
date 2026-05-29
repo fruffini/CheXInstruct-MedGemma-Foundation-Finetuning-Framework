@@ -66,13 +66,11 @@ from src.dataset import load_parquet_image_dataset
 from src.models import get_collator, configure_model_for_training
 from util_finetune import evaluate, BlueprintGroupedSampler
 
-os.environ["HF_TOKEN"] = "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"
 cache_dir = os.path.join(os.getcwd(), "hf_cache")
 os.environ["HF_DATASETS_CACHE"] = cache_dir
 os.environ["HF_HOME"] = cache_dir
 os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
 os.environ["HF_HUB_CACHE"] = cache_dir
-os.environ["HF_TOKEN"] = "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"
 CACHE_DIR = os.path.join(os.getcwd(), "hf_models_cache")
 logger = get_logger(__name__)
 hf_token = os.environ.get("HF_TOKEN", "")

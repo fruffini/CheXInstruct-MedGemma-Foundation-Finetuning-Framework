@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Finetuning script for GEMMA3 or other causal language models using HuggingFace Transformers and Accelerate.
+Tokenization script for CheXInstruct dataset formatted for Gemma-3.
 
-This script is adapted from the official Transformers language modeling tutorial to support finetuning
-GEMMA3 and similar models on a text file or dataset, without using the HuggingFace Trainer.
+Loads a pre-formatted HuggingFace Parquet dataset (produced by createHFDataset.py),
+tokenizes it using the target model's collator, and saves the tokenized result to disk.
+The tokenized dataset is the direct input to the finetuning pipeline.
 
-For more details and checkpoints, see:
-https://huggingface.co/models?filter=text-generation
+Usage:
+    python src/dataset/chexinstruct/format_chexinstruct.py \\
+        --model_name_or_path google/gemma-3-4b-it \\
+        --dataset_dir data_chexinstruct/hf_parquet_gemma_format/gemma_findings \\
+        --output_dir gemma_3
 """
-# You can adapt this script for your own causal language modeling tasks. See comments for pointers.
 import warnings
 warnings.filterwarnings("ignore")
 import sys
@@ -32,13 +35,11 @@ from accelerate.logging import get_logger
 from src.dataset import load_parquet_image_dataset, save_dataset_as_parquet
 from src.models import get_collator
 
-os.environ["HF_TOKEN"] = "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"
 cache_dir = os.path.join(os.getcwd(), "hf_cache")
 os.environ["HF_DATASETS_CACHE"] = cache_dir
 os.environ["HF_HOME"] = cache_dir
 os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
 os.environ["HF_HUB_CACHE"] = cache_dir
-os.environ["HF_TOKEN"] = "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"
 CACHE_DIR = os.path.join(os.getcwd(), "hf_models_cache")
 logger = get_logger(__name__)
 hf_token = os.environ.get("HF_TOKEN", "")

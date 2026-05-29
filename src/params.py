@@ -159,6 +159,3 @@ class CustomTrainingArguments:
     with_tracking: bool = field(default=True, metadata={"help": "Whether to use tracking for the training run."})
     lr: float = field(default=2e-4, metadata={"help": "Learning rate for the optimizer."})
     debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode with fewer epochs and smaller batch size."})
-
-
-    # liger-kernel
